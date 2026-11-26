@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="460" viewBox="0 0 960 460" font-family="IBM Plex Mono, ui-monospace, Consolas, monospace">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d2a36"/>
+      <stop offset="0.55" stop-color="#16212b"/>
+      <stop offset="1" stop-color="#0c1219"/>
+    </linearGradient>
+    <linearGradient id="fog" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#A8C8E8" stop-opacity="0"/>
+      <stop offset="1" stop-color="#A8C8E8" stop-opacity="0.10"/>
+    </linearGradient>
+    <filter id="soft"><feGaussianBlur stdDeviation="6"/></filter>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#A8C8E8" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#A8C8E8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- misty forest backdrop -->
+  <rect width="960" height="460" rx="18" fill="url(#sky)"/>
+  <g filter="url(#soft)" opacity="0.55">
+    <path d="M0 330 L40 250 L70 300 L110 210 L150 290 L190 230 L230 300 L270 220 L320 310 L360 240 L400 300 L450 200 L500 290 L540 230 L590 310 L630 220 L680 300 L720 240 L770 310 L820 210 L870 290 L920 240 L960 300 L960 460 L0 460 Z" fill="#0f1a22"/>
+    <path d="M0 380 L50 310 L90 360 L140 290 L190 370 L240 300 L300 380 L350 320 L410 380 L470 300 L530 370 L590 310 L650 380 L710 320 L770 380 L830 300 L890 370 L960 320 L960 460 L0 460 Z" fill="#0b141b"/>
+  </g>
+  <rect width="960" height="460" rx="18" fill="url(#fog)"/>
+  <rect width="960" height="460" rx="18" fill="rgba(10,16,24,0.35)"/>
+
+  <!-- window -->
+  <g transform="translate(40 34)">
+    <rect width="880" height="392" rx="14" fill="rgba(16,24,34,0.62)" stroke="rgba(232,237,242,0.14)"/>
+
+    <!-- header -->
+    <text x="22" y="32" fill="#E8EDF2" font-size="15" font-weight="600">[HARV]</text>
+    <g font-size="11" fill="#8A99A8">
+      <rect x="110" y="16" width="52" height="22" rx="11" fill="#A8C8E8"/>
+      <text x="122" y="31" fill="#0c1219" font-weight="600">AUTO</text>
+      <text x="176" y="31">haiku</text><text x="228" y="31">sonnet</text><text x="288" y="31">opus</text>
+    </g>
+    <text x="858" y="31" fill="#9FE0C4" font-size="11" text-anchor="end">● synced · PC + notebook</text>
+    <line x1="0" y1="50" x2="880" y2="50" stroke="rgba(232,237,242,0.10)"/>
+
+    <!-- tabs -->
+    <g font-size="11">
+      <path d="M18 76 v-14 a6 6 0 0 1 6 -6 h132 a6 6 0 0 1 6 6 v14 z" fill="rgba(168,200,232,0.14)"/>
+      <text x="30" y="72" fill="#E8EDF2">Morning check</text>
+      <text x="186" y="72" fill="#8A99A8">garden_app</text>
+      <text x="276" y="72" fill="#8A99A8">Video edit</text>
+      <text x="372" y="72" fill="#8A99A8">+</text>
+    </g>
+    <line x1="0" y1="76" x2="690" y2="76" stroke="rgba(232,237,242,0.10)"/>
+
+    <!-- chat -->
+    <g font-size="12.5">
+      <text x="24" y="108" fill="#8A99A8">08:02</text>
+      <text x="80" y="108" fill="#E8EDF2">you&gt; why is my PC loud right now?</text>
+
+      <text x="24" y="140" fill="#8A99A8">08:02</text>
+      <text x="80" y="140" fill="#A8C8E8">harv&gt;</text>
+      <text x="130" y="140" fill="#C9D3DC">The GPU fan is at 2100 rpm: a browser tab is</text>
+      <text x="130" y="160" fill="#C9D3DC">decoding video on the GPU (38 %). Close it, or</text>
+      <text x="130" y="180" fill="#C9D3DC">shall I cap that tab for you?</text>
+      <rect x="130" y="190" width="104" height="18" rx="4" fill="rgba(168,200,232,0.12)"/>
+      <text x="138" y="203" fill="#A8C8E8" font-size="10.5">[sonnet·medium]</text>
+
+      <text x="24" y="236" fill="#8A99A8">08:03</text>
+      <text x="80" y="236" fill="#E8EDF2">you&gt; cap it. and dim the lights a bit</text>
+
+      <text x="24" y="268" fill="#8A99A8">08:03</text>
+      <text x="80" y="268" fill="#A8C8E8">harv&gt;</text>
+      <text x="130" y="268" fill="#C9D3DC">Done. Lights at 40 %, warm.</text>
+      <rect x="130" y="278" width="88" height="18" rx="4" fill="rgba(168,200,232,0.12)"/>
+      <text x="138" y="291" fill="#A8C8E8" font-size="10.5">[haiku·low]</text>
+    </g>
+
+    <!-- status line + prompt -->
+    <text x="24" y="336" fill="#F2B880" font-size="12">✻ thinking… (4s · ↓ 120 tokens · esc to stop)</text>
+    <rect x="18" y="348" width="656" height="28" rx="6" fill="rgba(8,12,18,0.45)" stroke="rgba(168,200,232,0.25)"/>
+    <text x="30" y="367" fill="#A8C8E8" font-size="13">harv&gt;</text>
+    <rect x="80" y="356" width="8" height="14" fill="#A8C8E8" opacity="0.8"/>
+
+    <!-- stats panel -->
+    <line x1="690" y1="50" x2="690" y2="392" stroke="rgba(232,237,242,0.10)"/>
+    <g font-size="11" transform="translate(708 78)">
+      <text fill="#8A99A8" letter-spacing="2">LIVE</text>
+      <g transform="translate(0 26)">
+        <text fill="#C9D3DC">CPU</text><text x="152" fill="#E8EDF2" text-anchor="end">23%</text>
+        <rect y="8" width="152" height="3" rx="1.5" fill="rgba(232,237,242,0.10)"/><rect y="8" width="35" height="3" rx="1.5" fill="url(#bar)"/>
+      </g>
+      <g transform="translate(0 62)">
+        <text fill="#C9D3DC">GPU</text><text x="152" fill="#E8EDF2" text-anchor="end">38%</text>
+        <rect y="8" width="152" height="3" rx="1.5" fill="rgba(232,237,242,0.10)"/><rect y="8" width="58" height="3" rx="1.5" fill="url(#bar)"/>
+      </g>
+      <g transform="translate(0 98)">
+        <text fill="#C9D3DC">RAM</text><text x="152" fill="#E8EDF2" text-anchor="end">54%</text>
+        <rect y="8" width="152" height="3" rx="1.5" fill="rgba(232,237,242,0.10)"/><rect y="8" width="82" height="3" rx="1.5" fill="url(#bar)"/>
+      </g>
+      <g transform="translate(0 134)">
+        <text fill="#C9D3DC">TEMP</text><text x="152" fill="#E8EDF2" text-anchor="end">61°</text>
+        <rect y="8" width="152" height="3" rx="1.5" fill="rgba(232,237,242,0.10)"/><rect y="8" width="93" height="3" rx="1.5" fill="url(#bar)"/>
+      </g>
+      <text y="188" fill="#8A99A8" letter-spacing="2">PLAN</text>
+      <g transform="translate(0 214)">
+        <text fill="#C9D3DC">session</text><text x="152" fill="#E8EDF2" text-anchor="end">31%</text>
+        <rect y="8" width="152" height="3" rx="1.5" fill="rgba(232,237,242,0.10)"/><rect y="8" width="47" height="3" rx="1.5" fill="url(#bar)"/>
+      </g>
+      <g transform="translate(0 250)">
+        <text fill="#C9D3DC">weekly</text><text x="152" fill="#F2B880" text-anchor="end">86%</text>
+        <rect y="8" width="152" height="3" rx="1.5" fill="rgba(232,237,242,0.10)"/><rect y="8" width="131" height="3" rx="1.5" fill="#F2B880"/>
+      </g>
+    </g>
+  </g>
+</svg>

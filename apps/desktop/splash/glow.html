@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Harv is using this screen</title>
+    <style>
+      /* Desktop control's screen glow (src-tauri/src/pill.rs): a soft frame around the monitor Harv acts on.
+         The window lets every click through and stays out of screenshots, so only the user sees it. */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+      }
+      .glow {
+        position: fixed;
+        inset: 0;
+        box-shadow:
+          inset 0 0 0 2px rgba(168, 200, 232, 0.5),
+          inset 0 0 40px 4px rgba(168, 200, 232, 0.32);
+        animation: breathe 2.4s ease-in-out infinite;
+      }
+      /* Opacity only: cheap on a window as big as the screen. */
+      @keyframes breathe {
+        50% {
+          opacity: 0.5;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .glow {
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="glow"></div>
+  </body>
+</html>

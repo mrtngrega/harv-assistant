@@ -1,0 +1,33 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build output
+dist/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/schemas/
+scripts/ui-check/out/
+
+# The user's notes about Harv: personal, kept in step by Harv's device sync (docs/PLAN.md §6m), not git
+harv_report.md
+harv_skills.md
+Harv_ideas.txt

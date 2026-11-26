@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <!-- The phone's home-screen app (docs/PLAN.md §6q). -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icon-180.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <!-- "black": a solid status bar in the manifest's theme colour, which iOS saves when the icon is
+         added (2026-11-16 on the user's iPhone: a theme-color set by the page, even in its source,
+         changed nothing). Not "black-translucent": iOS reported a 59 px top inset and an 852 px screen
+         but still drew the bar dark and showed the page only to 793 px, cutting the app off at the
+         bottom (2026-10-29 and 2026-11-16). The style too is saved with the icon. -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-title" content="Harv" />
+    <meta name="theme-color" content="#0a1018" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cdefs%3E%3CradialGradient%20id%3D%22b%22%20cx%3D%2236%25%22%20cy%3D%2230%25%22%20r%3D%2278%25%22%3E%3Cstop%20offset%3D%220%22%20stop-color%3D%22%232c3e51%22%2F%3E%3Cstop%20offset%3D%22.6%22%20stop-color%3D%22%2316212c%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%230b1118%22%2F%3E%3C%2FradialGradient%3E%3C%2Fdefs%3E%3Cg%3E%3Ccircle%20cx%3D%2232%22%20cy%3D%2232%22%20r%3D%2229%22%20fill%3D%22url(%23b)%22%20stroke%3D%22%23A8C8E8%22%20stroke-opacity%3D%22.85%22%20stroke-width%3D%222.6%22%2F%3E%3Cpath%20d%3D%22M8.6%2023.4%20A25%2025%200%200%201%2021.4%209.4%22%20fill%3D%22none%22%20stroke%3D%22%23eef5fb%22%20stroke-opacity%3D%22.35%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%2F%3E%3Crect%20x%3D%2218.5%22%20y%3D%2219%22%20width%3D%225.6%22%20height%3D%2226%22%20rx%3D%221.6%22%20fill%3D%22%23A8C8E8%22%2F%3E%3Crect%20x%3D%2239.9%22%20y%3D%2219%22%20width%3D%225.6%22%20height%3D%2226%22%20rx%3D%221.6%22%20fill%3D%22%23A8C8E8%22%2F%3E%3Cg%20fill%3D%22%23eef5fb%22%3E%3Cg%20transform%3D%22translate(0%200)%22%3E%3Crect%20x%3D%2226.1%22%20y%3D%2226.5%22%20width%3D%224.4%22%20height%3D%2211%22%20rx%3D%222.2%22%2F%3E%3Crect%20x%3D%2233.5%22%20y%3D%2226.5%22%20width%3D%224.4%22%20height%3D%2211%22%20rx%3D%222.2%22%2F%3E%3C%2Fg%3E%3C%2Fg%3E%3C%2Fg%3E%3C%2Fsvg%3E"
+    />
+    <title>Harv</title>
+    <style>
+      /* The boot cover: the app's starting page (apps/desktop/splash), shown from the first frame
+         until the dashboard has its settings, layout, fonts and photo (lib/boot.ts), so nothing
+         is seen loading. */
+      html,
+      body {
+        background: #0a1018;
+      }
+      /* Only an installed Plex, like the starting page: the dashboard's own copy loading
+         later mustn't change the cover's text. */
+      @font-face {
+        font-family: 'Harv Boot';
+        src: local('IBM Plex Mono'), local('IBMPlexMono');
+      }
+      #boot {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: grid;
+        place-items: center;
+        background: #0a1018;
+        color: #7d8c9c;
+        font:
+          13px 'Harv Boot',
+          ui-monospace,
+          Consolas,
+          'DejaVu Sans Mono',
+          monospace;
+        user-select: none;
+        transition: opacity 0.2s ease;
+      }
+      #boot div {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 14px;
+      }
+      #boot b {
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        color: #a8c8e8;
+      }
+      #boot span {
+        animation: boot-pulse 1.4s ease-in-out infinite;
+      }
+      @keyframes boot-pulse {
+        50% {
+          opacity: 0.3;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot span {
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="boot" data-tauri-drag-region>
+      <div data-tauri-drag-region>
+        <b data-tauri-drag-region style="display: inline-flex; align-items: center; gap: 10px"
+          ><svg width="28" height="28" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+            <defs>
+              <radialGradient id="hvb" cx="36%" cy="30%" r="78%">
+                <stop offset="0" stop-color="#2c3e51" />
+                <stop offset=".6" stop-color="#16212c" />
+                <stop offset="1" stop-color="#0b1118" />
+              </radialGradient>
+            </defs>
+            <g>
+              <circle cx="32" cy="32" r="29" fill="url(#hvb)" stroke="#A8C8E8" stroke-opacity=".85" stroke-width="2.6" />
+              <path
+                d="M8.6 23.4 A25 25 0 0 1 21.4 9.4"
+                fill="none"
+                stroke="#eef5fb"
+                stroke-opacity=".35"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+              <rect x="18.5" y="19" width="5.6" height="26" rx="1.6" fill="#A8C8E8" />
+              <rect x="39.9" y="19" width="5.6" height="26" rx="1.6" fill="#A8C8E8" />
+              <g fill="#eef5fb">
+                <g transform="translate(0 0)">
+                  <rect x="26.1" y="26.5" width="4.4" height="11" rx="2.2" />
+                  <rect x="33.5" y="26.5" width="4.4" height="11" rx="2.2" />
+                </g>
+              </g>
+            </g></svg
+          >HARV</b
+        >
+        <p style="margin: 0" data-tauri-drag-region>starting<span>…</span></p>
+      </div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <script>
+      // A page that loaded while Harv was restarting can get this file but not its scripts (Vite
+      // not ready yet): nothing ever lifts the cover, and it stayed on "starting…" (the notebook
+      // app, 2026-11-12). main.tsx marks the page once it runs; if it never did, load it again.
+      setTimeout(function () {
+        if (!document.documentElement.dataset.ran) location.reload();
+      }, 15000);
+    </script>
+  </body>
+</html>

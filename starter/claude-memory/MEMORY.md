@@ -1,0 +1,10 @@
+- [User profile](user-profile.md) — who the user is, filled in by the setup
+- [Harv is Claude](harv-is-claude.md) — what's taught in these sessions IS Harv: rules go to harv/persona.md too
+- [Session start](routine-start.md) — keyword "start": read the docs, check state, report, suggest the next step
+- [End of session](routine-bye-fresh.md) — keyword "bye" (and "fresh"): checks, docs, commit + push, memory, handoff
+- [Working on my own](working-autonomy.md) — do it yourself, grill once then build, push back, no asks between steps
+- [Build and test](build-and-test.md) — build first, verify in the real app, fixes work in general, find UI bugs by measuring
+- [Git and checks](git-and-checks.md) — commit only on real green, format only your files, verify every "what's left"
+- [Windows shell gotchas](windows-shell-gotchas.md) — heredocs eat backslashes, Python writes CRLF, capturing the app window
+- [Plan usage](plan-usage.md) — subscription only, quality first near the limit, helper agents are dear, log what work costs
+- [New project folder](new-project-folder.md) — a new project gets its folder at once, private or public asked

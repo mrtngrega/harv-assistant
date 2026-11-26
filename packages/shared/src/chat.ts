@@ -1,0 +1,262 @@
+export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/** A model the user's plan offers, as reported by Claude Code. */
+export interface ModelOption {
+  /** Alias passed to the SDK ("opus", "sonnet", ...). */
+  id: string;
+  name: string;
+  description: string;
+  efforts: EffortLevel[];
+}
+
+export interface Catalog {
+  /** e.g. "Claude Pro". */
+  plan: string | null;
+  models: ModelOption[];
+  /** Claude Code's slash commands (and skills) a plain chat offers; a chat's own list replaces it once its session runs. */
+  commands: SlashCommandInfo[];
+}
+
+/** A Claude Code slash command or skill, typed as `/name args` in the chat. */
+export interface SlashCommandInfo {
+  name: string;
+  description: string;
+  argumentHint: string;
+}
+
+/** A message typed while Harv was still answering: it runs when the turn ends. */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  files?: string[];
+  /** The files themselves, so the message can be taken back into the input to edit. */
+  attachments?: Attachment[];
+  /** Already handed to Claude: it goes in at the running reply's next step and can't be edited or removed any more. */
+  handed?: boolean;
+}
+
+/** A background task a chat started (a subagent, a shell or a monitor), for the strip above the prompt. */
+export interface BackgroundTask {
+  id: string;
+  /** "local_agent", "local_bash", "monitor"… */
+  kind: string;
+  /** The agent type of a subagent ("general-purpose", a custom agent's name). */
+  agent?: string;
+  description: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  startedAt: number;
+  endedAt?: number;
+  /** The last tool it used, while it runs. */
+  lastTool?: string;
+  /** Its result summary when it ended, or its one-line status while it runs. */
+  summary?: string;
+}
+
+/** "auto" lets Harv pick; anything else is a model id from the catalog. */
+export type ModelChoice = 'auto' | (string & {});
+
+/** From this context size the chat's context label suggests /fresh (the user's pick, 2026-10-25). */
+export const FRESH_HINT_TOKENS = 200_000;
+
+/** The longest history search the server runs (SQLite refuses very long LIKE patterns). */
+export const HISTORY_QUERY_MAX = 200;
+
+/** What AUTO runs when the router can't decide (e.g. the classifier failed). */
+export const AUTO_FALLBACK = { model: 'sonnet', effort: 'medium' } as const satisfies { model: string; effort: EffortLevel };
+
+/** How a turn's model·effort was chosen. */
+export type RouteSource =
+  'manual' | 'override' | 'rule' | 'classifier' | 'followup' | 'harder' | 'stepup' | 'fallback' | 'command' | 'background';
+
+/** The model·effort a turn runs at, and why. */
+export interface RouteDecision {
+  model: string;
+  effort: EffortLevel;
+  source: RouteSource;
+  /** Shown when hovering the reply's tag. */
+  reason: string;
+}
+
+export interface ChatUsage {
+  inputTokens: number;
+  outputTokens: number;
+  durationMs: number;
+  /** The turn's notional API cost in USD (Claude Code's estimate; nothing is billed): what plan usage tracks best. */
+  costUsd?: number;
+}
+
+/** `thinking`: a summary of what Claude thought before answering (shown folded, like Claude Code's). */
+export type LineKind = 'you' | 'harv' | 'tool' | 'notice' | 'error' | 'thinking';
+
+/** A finished chat line as stored in the history database. */
+export interface StoredLine {
+  kind: LineKind;
+  text: string;
+  /** "sonnet·medium" on Harv's replies; how long it thought ("12s") on thinking lines. */
+  tag?: string;
+  /** Why that model·effort was picked. */
+  reason?: string;
+  /** Names of the files attached to the user's message. */
+  files?: string[];
+  /** On tool lines: the tool_use id, which is also the action log id. */
+  ref?: string;
+  /** When the line was written (epoch ms); filled in from the database. */
+  at?: number;
+}
+
+/** A file uploaded with POST /api/attachments, waiting to be sent with a message. */
+export interface Attachment {
+  id: string;
+  name: string;
+  size: number;
+  mime: string;
+  /**
+   * A file or folder on the user's own PC, referenced where it is (the app's picker, a drop,
+   * `@path`, the file explorer): nothing is uploaded, Harv works on it in place, and the
+   * safety gate trusts it for that chat (the user's wish, 2026-10-26). Absent for uploads.
+   */
+  path?: string;
+  folder?: boolean;
+}
+
+/** An attachment that points at a file or folder on the PC instead of an uploaded copy. */
+export const isReference = (a: Attachment): a is Attachment & { path: string } => typeof a.path === 'string' && a.path !== '';
+
+/** One suggestion for `@` in the command line (GET /api/paths). */
+export interface PathSuggestion {
+  path: string;
+  name: string;
+  folder: boolean;
+  size: number;
+}
+
+/** Largest file the dashboard accepts. */
+export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+
+/** An open chat tab with its saved lines (sent on connect and when reopening from history). */
+export interface ChatSnapshot {
+  id: string;
+  title: string;
+  lines: StoredLine[];
+  /** The conversation's context size: the latest message's input plus output. */
+  context?: number;
+  /** The project this chat works on (project mode), if any. */
+  projectId?: string;
+  /** Messages waiting for the current turn to end. */
+  queued?: QueuedMessage[];
+  /** This chat's slash commands, once its session has started (otherwise the catalog's). */
+  commands?: SlashCommandInfo[];
+  /** Background tasks it started that are running or ended a short while ago. */
+  tasks?: BackgroundTask[];
+  /** The chat is in plan mode (only reading and planning until the user approves a plan). */
+  planning?: boolean;
+  /** It has a Claude session on this device to continue (a chat from the other device has none yet). */
+  resumable?: boolean;
+  /**
+   * A reply is running now: a window that connects mid-reply shows it busy (STOP, the status line), not
+   * idle (the full review, U1). `model`/`effort` as `chat.started` names them.
+   */
+  running?: { since: number; model: string; effort: EffortLevel; reason?: string };
+}
+
+export interface HistoryItem {
+  id: string;
+  title: string;
+  updatedAt: number;
+  open: boolean;
+  /** Matching text when the list is a search result. */
+  snippet?: string;
+  projectId?: string;
+  /** One line on what the chat is about (the router's classifier keeps it, docs/PLAN.md §6c). */
+  summary?: string;
+}
+
+export type ChatClientMessage =
+  /** `spoken`: voice mode, so the reply is read aloud (docs/PLAN.md §6q). */
+  | {
+      type: 'chat.send';
+      tabId: string;
+      text: string;
+      model: ModelChoice;
+      effort: EffortLevel;
+      attachments?: Attachment[];
+      spoken?: boolean;
+      /** The Yes / No buttons under held steps: the answer itself, so it isn't read or judged again. */
+      answer?: 'yes' | 'no';
+    }
+  | { type: 'chat.stop'; tabId: string }
+  /** Stop one background task (a subagent or shell) without stopping the reply. */
+  | { type: 'chat.stopTask'; tabId: string; taskId: string }
+  /** Drop a queued message before it runs. */
+  | { type: 'chat.unqueue'; tabId: string; id: string }
+  /** Run a queued message now: the current reply stops and this one goes first. */
+  | { type: 'chat.sendNow'; tabId: string; id: string }
+  /** Run the last message again one step up the model·effort ladder. */
+  | { type: 'chat.harder'; tabId: string }
+  | { type: 'chat.close'; tabId: string }
+  /** Reopen a chat from history as a tab. */
+  | { type: 'chat.open'; tabId: string }
+  /** This window doesn't have an open chat another window made: send it here only, without switching to it. */
+  | { type: 'chat.load'; tabId: string }
+  | { type: 'chat.delete'; tabId: string }
+  /** The user renamed a chat (right-click on its tab); auto-naming leaves it alone after that. */
+  | { type: 'chat.rename'; tabId: string; title: string }
+  /** Plan mode on or off (/plan): Claude only reads and plans, then shows a plan to approve. */
+  | { type: 'chat.plan'; tabId: string; on: boolean }
+  /**
+   * Rewind: files and the conversation go back to before one of the user's messages, and the
+   * later messages are dropped (Claude Code's /rewind). `fromEnd`: how many of the user's
+   * messages come after it in the chat (0 = the last one).
+   */
+  | { type: 'chat.rewind'; tabId: string; fromEnd: number }
+  | { type: 'history.search'; query: string };
+
+export type ChatServerMessage =
+  /** A turn began; `model`/`effort` are what actually runs (AUTO resolved). */
+  | { type: 'chat.started'; tabId: string; model: string; effort: EffortLevel; auto: boolean; reason: string }
+  /** Harv changed this chat's model pick (set_model, the user asked in plain words): the header follows. */
+  | { type: 'chat.pick'; tabId: string; model: ModelChoice; effort: EffortLevel }
+  /** Harv's presence_demo: the dashboard plays every presence state in this chat (a simulation). */
+  | { type: 'presence.demo'; tabId: string }
+  /** The desktop pill's demo (scripts/pill-demo.mjs, POST /api/pill/demo): the app plays every pill state once. */
+  | { type: 'pill.demo' }
+  /** AUTO stepped up mid-reply (it was struggling): the rest of the reply runs at this model·effort. */
+  | { type: 'chat.stepped'; tabId: string; model: string; effort: EffortLevel; reason: string }
+  | { type: 'chat.delta'; tabId: string; text: string }
+  /** Tokens Claude has written this turn so far (estimated while a message streams, exact after it), for the status line. */
+  | { type: 'chat.progress'; tabId: string; outputTokens: number }
+  /** The conversation's context size right now: what the latest message sent plus what it wrote (live, every API call of a turn). */
+  | { type: 'chat.context'; tabId: string; tokens: number }
+  /** Final text of one assistant message (replaces the streamed text). */
+  | { type: 'chat.assistant'; tabId: string; text: string }
+  | { type: 'chat.tool'; tabId: string; id: string; name: string; detail: string }
+  /** One stretch of thinking finished: its summary and how long it took. */
+  | { type: 'chat.thinking'; tabId: string; text: string; seconds: number }
+  /** `troubled`: the reply's last tool result was a failure (AUTO keeps a stepped-up pick then). */
+  | { type: 'chat.done'; tabId: string; ok: boolean; stopped: boolean; error?: string; usage?: ChatUsage; troubled?: boolean }
+  | { type: 'chat.notice'; tabId: string; message: string }
+  | { type: 'chat.error'; tabId: string; message: string }
+  /** A chat to show as a tab; `focus: false` opens it without switching to it (a hand-off). */
+  /** `movedFrom`: opened for a "start a new chat and …" said in that chat; the window showing it switches over (and its voice follows). */
+  | { type: 'chat.opened'; chat: ChatSnapshot; focus?: boolean; movedFrom?: string }
+  /** A finished line added by the server (a hand-off's request), appended as is. */
+  | { type: 'chat.line'; tabId: string; line: StoredLine }
+  | { type: 'chat.removed'; tabId: string }
+  /** /clear ran: the tab empties, like Claude Code's screen (the chat stays in history, empty). */
+  | { type: 'chat.cleared'; tabId: string }
+  /** A chat's title changed (named automatically, or by the user). */
+  | { type: 'chat.renamed'; tabId: string; title: string }
+  /** The messages waiting in a chat for its turn to end (the whole list, replacing the last one). */
+  | { type: 'chat.queued'; tabId: string; items: QueuedMessage[] }
+  /** A chat's slash commands changed (its session started, or found new skills). */
+  | { type: 'chat.commands'; tabId: string; commands: SlashCommandInfo[] }
+  /** A chat's background tasks (the whole list, replacing the last one). */
+  | { type: 'chat.tasks'; tabId: string; tasks: BackgroundTask[] }
+  /** A chat went into plan mode or out of it. */
+  | { type: 'chat.plan'; tabId: string; on: boolean }
+  /** A rewind ran: the chat's lines now (replacing them), and the message it went back before, for the input. */
+  | { type: 'chat.rewound'; tabId: string; chat: ChatSnapshot; text: string; files?: string[] }
+  /** The history list; `query` echoes the search it answers ("" = everything). */
+  | { type: 'history'; items: HistoryItem[]; query: string };

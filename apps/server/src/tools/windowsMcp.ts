@@ -1,0 +1,170 @@
+import { execFile } from 'node:child_process';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { McpStdioServerConfig } from '@anthropic-ai/claude-agent-sdk';
+import { HARV_HOME } from '../paths.ts';
+import { IS_WINDOWS } from '../platform.ts';
+import { DESKTOP_TOOLS, monitorLabel, workArea, type Monitor, type WorkArea } from '../safety/desktop.ts';
+import { loadSettings } from '../settings.ts';
+import { run } from '../run.ts';
+
+// Desktop control (docs/PLAN.md §6t item 1): Windows-MCP (CursorTouch, MIT) gives chats the screen
+// as text (Windows' accessibility tree: buttons, fields, labels), screenshots, the mouse and the
+// keyboard. Reviewed on 2026-11-06 at 0.8.8, the version pinned here; it lives in its own venv in
+// ~/.harv/windows-mcp, installed from Settings › What Harv can do › Desktop control. What a chat may do
+// with it is safety/desktop.ts. Windows only.
+
+/** The version reviewed. A newer one gets a new review before this changes. */
+export const WINDOWS_MCP_VERSION = '0.8.8';
+const HOME = join(HARV_HOME, 'windows-mcp');
+const VENV = join(HOME, 'venv');
+const EXE = join(VENV, 'Scripts', 'windows-mcp.exe');
+const PYTHON = join(VENV, 'Scripts', 'python.exe');
+/** Starts it without its own glow and notice pill: Harv's pill is the indicator (windows_mcp_quiet.py). */
+const QUIET = fileURLToPath(new URL('./windows_mcp_quiet.py', import.meta.url));
+/** Lists the monitors in Windows-MCP's coordinates (windows_displays.py). */
+const DISPLAYS = fileURLToPath(new URL('./windows_displays.py', import.meta.url));
+
+/**
+ * How the server is started. Its telemetry (PostHog, on unless told otherwise; it sends every
+ * tool's result) is always off, and only the allowed tools exist: its shell, file, registry,
+ * process and web tools never start, so nothing gets around the gate and Harv's backups.
+ */
+export const WINDOWS_MCP_ENV: Record<string, string> = {
+  ANONYMIZED_TELEMETRY: 'false',
+  WINDOWS_MCP_TOOLS: DESKTOP_TOOLS.join(','),
+  // No white flash over the screen at every screenshot.
+  WINDOWS_MCP_DISABLE_FLASH: '1',
+  // When the user last talked to Harv (grantDesktop): the quiet launcher doesn't count that input as them taking over.
+  HARV_DESKTOP_GRANT: join(HOME, 'grant.json'),
+  // Where the window of an App launch/switch goes (pinWindows): Harv's monitor.
+  HARV_DESKTOP_PIN: join(HOME, 'pin.json'),
+};
+
+/**
+ * The next App launch/switch moves its window onto `area` (windows_mcp_quiet.py), or leaves it where
+ * it opens with null: Windows opens new windows on the main monitor, and Harv works on his own.
+ */
+export function pinWindows(area: WorkArea | null): void {
+  try {
+    writeFileSync(WINDOWS_MCP_ENV.HARV_DESKTOP_PIN!, JSON.stringify(area ? { at: Date.now(), region: area.region } : { at: Date.now() }));
+  } catch {
+    // No venv folder yet: nothing runs App.
+  }
+}
+
+/**
+ * The user's input up to `at` (their message, their Approve click) was them talking to Harv: Windows-MCP
+ * may act now instead of waiting 10 s after it (windows_mcp_quiet.py). Input after it still counts.
+ */
+export function grantDesktop(at: number): void {
+  try {
+    writeFileSync(WINDOWS_MCP_ENV.HARV_DESKTOP_GRANT!, JSON.stringify({ at }));
+  } catch {
+    // No venv folder yet: nothing to grant.
+  }
+}
+
+/** A local server on stdin/stdout (no port, nothing on the network), through Harv's quiet launcher. */
+export const WINDOWS_MCP_ARGS = ['-I', QUIET, 'serve', '--transport', 'stdio'];
+
+export interface DesktopStatus {
+  /** This OS can have it at all. */
+  available: boolean;
+  installed: boolean;
+  installing: boolean;
+  /** What the install brings, for Settings. */
+  needs?: string;
+  /** Why the last install failed. */
+  error?: string;
+  /** The monitors (once installed), named for the user, and which one Harv works on. */
+  monitors?: { device: string; label: string; size: string; work: boolean }[];
+}
+
+export class WindowsMcp {
+  private installing = false;
+  private error: string | undefined;
+  private monitors: Monitor[] = [];
+
+  constructor(private onChange: (status: DesktopStatus) => void = () => {}) {
+    this.refreshMonitors();
+  }
+
+  /** Reads the monitors again in the background (at start, and whenever Settings asks). */
+  refreshMonitors(): void {
+    if (!this.installed()) return;
+    execFile(PYTHON, ['-I', DISPLAYS], { windowsHide: true, timeout: 10_000 }, (err, stdout) => {
+      if (err) return;
+      try {
+        const list = JSON.parse(stdout) as Monitor[];
+        if (Array.isArray(list) && list.length) this.monitors = list;
+      } catch {
+        // Keep the last good list.
+      }
+    });
+  }
+
+  /** The monitor chats work on: the user's pick in Settings, else the smallest (null until known). */
+  area(): WorkArea | null {
+    return workArea(this.monitors, loadSettings().desktopScreen);
+  }
+
+  installed(): boolean {
+    return IS_WINDOWS && existsSync(EXE);
+  }
+
+  status(): DesktopStatus {
+    return {
+      available: IS_WINDOWS,
+      installed: this.installed(),
+      installing: this.installing,
+      needs: `It needs Windows-MCP (version ${WINDOWS_MCP_VERSION}, reviewed on 6 Nov, telemetry off) in Harv’s own folder, once per computer. Python 3.14 does the install.`,
+      ...(this.error ? { error: this.error } : {}),
+      ...(this.monitors.length ? { monitors: this.describe() } : {}),
+    };
+  }
+
+  private describe(): NonNullable<DesktopStatus['monitors']> {
+    const work = this.area();
+    return this.monitors.map((m) => ({
+      device: m.device,
+      label: monitorLabel(m, this.monitors),
+      size: `${m.right - m.left}×${m.bottom - m.top}`,
+      work: m.device === work?.device,
+    }));
+  }
+
+  /** What chats load, when the user turned it on and it's installed (else nothing). */
+  server(): McpStdioServerConfig | undefined {
+    if (!loadSettings().desktopControl || !this.installed()) return undefined;
+    return { type: 'stdio', command: PYTHON, args: WINDOWS_MCP_ARGS, env: WINDOWS_MCP_ENV };
+  }
+
+  /** Settings › Install: the venv with the reviewed version, once per computer (needs Python 3.14, the `py` launcher). */
+  async install(): Promise<void> {
+    if (!IS_WINDOWS || this.installing || this.installed()) return;
+    this.installing = true;
+    this.error = undefined;
+    this.onChange(this.status());
+    try {
+      rmSync(VENV, { recursive: true, force: true });
+      await run('py', ['-3.14', '-m', 'venv', VENV]);
+      await run(join(VENV, 'Scripts', 'python.exe'), [
+        '-m',
+        'pip',
+        'install',
+        '-q',
+        '--disable-pip-version-check',
+        `windows-mcp==${WINDOWS_MCP_VERSION}`,
+      ]);
+      if (!existsSync(EXE)) throw new Error('windows-mcp.exe is missing after the install.');
+      this.refreshMonitors();
+    } catch (err) {
+      this.error = (err as Error).message;
+    } finally {
+      this.installing = false;
+      this.onChange(this.status());
+    }
+  }
+}

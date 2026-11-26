@@ -1,0 +1,126 @@
+import {
+  DEFAULT_SETTINGS,
+  type Catalog,
+  type HarvPlatform,
+  type HarvSettings,
+  type HarvStatus,
+  type MetricsSnapshot,
+  type PlanUsage,
+  type Project,
+} from '@harv/shared';
+import { createStore } from './createStore.ts';
+import { onConnectionChange, onServerMessage, sendMessage } from './socket.ts';
+
+export interface HarvConnection {
+  connected: boolean;
+  status: HarvStatus;
+  /** The running tool while working. */
+  detail?: string;
+  version: string | null;
+  /** The OS the server runs on (Windows until the first hello says otherwise). */
+  platform: HarvPlatform;
+  /** The server's computer runs on a battery (a laptop). */
+  battery: boolean;
+}
+
+// Separate stores so the 1 s metrics ticks only re-render what reads metrics.
+const connection = createStore<HarvConnection>({ connected: false, status: 'idle', version: null, platform: 'windows', battery: false });
+const metrics = createStore<MetricsSnapshot | null>(null);
+/** The newest tick that arrived while the window was hidden. */
+let latestMetrics: MetricsSnapshot | null = null;
+const hidden = () => typeof document !== 'undefined' && document.hidden;
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || !latestMetrics) return;
+    metrics.set(latestMetrics);
+    latestMetrics = null;
+  });
+}
+const catalog = createStore<Catalog | null>(null);
+const usage = createStore<PlanUsage | null>(null);
+// Missing keys fall back to the defaults (a server older than the dashboard after a hot reload).
+const settings = createStore<HarvSettings>(DEFAULT_SETTINGS);
+/** Folders Harv works on as projects, and the last error adding one. */
+const projects = createStore<{ list: Project[]; error: string | null }>({ list: [], error: null });
+/** Background photo version for cache-busting; null = none set, undefined = not known yet. */
+const background = createStore<{ version: number | null | undefined }>({ version: undefined });
+/** Sync with the user's other devices (null until the first hello). */
+
+onConnectionChange((connected) => connection.set((c) => ({ ...c, connected })));
+
+onServerMessage((msg) => {
+  switch (msg.type) {
+    case 'hello':
+      connection.set({
+        connected: true,
+        status: msg.status,
+        version: msg.version,
+        platform: msg.platform ?? 'windows',
+        battery: msg.battery === true,
+      });
+      if (msg.metrics) metrics.set(msg.metrics);
+      if (msg.catalog) catalog.set(msg.catalog);
+      usage.set(msg.usage);
+      settings.set({ ...DEFAULT_SETTINGS, ...msg.settings });
+      background.set({ version: msg.background });
+      projects.set({ list: msg.projects, error: null });
+      break;
+    case 'projects':
+      projects.set({ list: msg.projects, error: null });
+      break;
+    case 'project.error':
+      projects.set((p) => ({ ...p, error: msg.message }));
+      break;
+    case 'harv.status':
+      connection.set((c) => ({ ...c, status: msg.status, detail: msg.detail }));
+      break;
+    case 'metrics.tick':
+      // A hidden window (the app in the tray, a background browser tab) keeps the latest and draws nothing;
+      // it shows it the moment it's visible again. Saves the laptop's battery.
+      if (hidden()) latestMetrics = msg.metrics;
+      else metrics.set(msg.metrics);
+      break;
+    case 'catalog':
+      catalog.set(msg.catalog);
+      break;
+    case 'usage.update':
+      usage.set(msg.usage);
+      break;
+    case 'settings':
+      settings.set({ ...DEFAULT_SETTINGS, ...msg.settings });
+      break;
+    case 'background':
+      background.set({ version: msg.version });
+      break;
+  }
+});
+
+export const useConnection = connection.use;
+export const getConnection = connection.get;
+export const subscribeConnection = connection.subscribe;
+/** The OS the server runs on, for code outside React. */
+export const getPlatform = () => connection.get().platform;
+export const useMetrics = metrics.use;
+export const useCatalog = catalog.use;
+export const useUsage = usage.use;
+export const getUsage = usage.get;
+export const subscribeUsage = usage.subscribe;
+export const useSettings = settings.use;
+export const getSettings = settings.get;
+export const useBackground = background.use;
+export const useProjects = projects.use;
+/** Settings › Sync › Sync now. */
+
+export const projectActions = {
+  add(path: string, name?: string) {
+    projects.set((p) => ({ ...p, error: null }));
+    sendMessage({ type: 'project.add', path, ...(name ? { name } : {}) });
+  },
+  remove: (id: string) => sendMessage({ type: 'project.remove', id }),
+};
+
+/** Saves a settings change on the server, which echoes it to every window. */
+export function updateSettings(patch: Partial<HarvSettings>): void {
+  settings.set((s) => ({ ...s, ...patch }));
+  sendMessage({ type: 'settings.update', patch });
+}

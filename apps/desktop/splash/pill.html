@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Harv</title>
+    <style>
+      /*
+       * Harv's pill (src-tauri/src/pill.rs), over every window. Two jobs in one window:
+       * - desktop control (mode "control"): what Harv does with the mouse and keyboard, and STOP;
+       * - Harv's face on the desktop while his own window isn't in front (pass C, C2): working, waiting
+       *   for a yes (amber; "dot" after a few seconds), asleep at a plan limit, a short "replied" note.
+       * A bundled page on purpose: it must work when the dashboard is broken. STOP is a real button.
+       */
+      :root {
+        --ink: #dbe6f0;
+        --muted: #7d8c9c;
+        --faint: #4d5b6a;
+        --accent: #a8c8e8;
+        --warn: #f2b880;
+        --eye: var(--accent);
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+        cursor: default;
+        font:
+          12px 'IBM Plex Mono',
+          ui-monospace,
+          Consolas,
+          monospace;
+        color: var(--ink);
+      }
+      .pill {
+        box-sizing: border-box;
+        position: absolute;
+        inset: 4px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 8px 0 6px;
+        border-radius: 999px;
+        background: rgba(16, 24, 34, 0.88);
+        border: 1px solid rgba(168, 200, 232, 0.45);
+        /* No outer glow: the window is only 4px bigger than the pill, so a glow would be cut into a rectangle. */
+        box-shadow: 0 0 0 1px rgba(10, 16, 24, 0.6);
+      }
+      body:not(.control) .pill {
+        cursor: pointer;
+      }
+      body:not(.control) .pill:hover {
+        background: rgba(22, 32, 44, 0.92);
+      }
+      body.waiting .pill,
+      body.dot .pill,
+      body.asleep .pill {
+        border-color: rgba(242, 184, 128, 0.6);
+      }
+      body.waiting,
+      body.dot,
+      body.asleep {
+        --eye: var(--warn);
+      }
+
+      /* His face: a small dark planet with two eyes of light. */
+      .face {
+        flex: none;
+        position: relative;
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        background: radial-gradient(circle at 40% 35%, #2a3a4c, #111a24 70%);
+        box-shadow: inset 0 0 0 1px rgba(168, 200, 232, 0.25);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+      }
+      .eye {
+        width: 5px;
+        height: 9px;
+        border-radius: 3px;
+        background: var(--eye);
+        box-shadow: 0 0 6px var(--eye);
+        transition:
+          transform 0.4s ease,
+          height 0.3s ease;
+      }
+      .eyes {
+        display: flex;
+        gap: 6px;
+      }
+      body.work .eyes {
+        animation: scan 4.2s ease-in-out infinite;
+      }
+      body.work .eye {
+        animation: blink 5.3s infinite;
+      }
+      @keyframes scan {
+        0%,
+        100% {
+          transform: translateX(-3px);
+        }
+        45%,
+        55% {
+          transform: translateX(3px);
+        }
+      }
+      @keyframes blink {
+        0%,
+        94%,
+        100% {
+          transform: scaleY(1);
+        }
+        97% {
+          transform: scaleY(0.1);
+        }
+      }
+      /* Waiting for a yes: amber, looking down at what waits. */
+      body.waiting .eyes,
+      body.dot .eyes {
+        transform: translateY(4px);
+      }
+      body.waiting .eye,
+      body.dot .eye {
+        height: 6px;
+      }
+      /* Asleep at a plan limit: eyes closed, a drifting z. */
+      body.asleep .eye {
+        height: 2px;
+        box-shadow: none;
+        opacity: 0.8;
+      }
+      .z {
+        display: none;
+        position: absolute;
+        right: -2px;
+        top: -4px;
+        font-size: 10px;
+        color: var(--warn);
+      }
+      body.asleep .z {
+        display: block;
+        animation: drift 3s ease-in-out infinite;
+      }
+      @keyframes drift {
+        0% {
+          opacity: 0;
+          transform: translate(0, 4px);
+        }
+        50% {
+          opacity: 1;
+        }
+        100% {
+          opacity: 0;
+          transform: translate(4px, -6px);
+        }
+      }
+      /* A reply just ended: happy closed eyes. */
+      body.notice .eye {
+        height: 4px;
+        border-radius: 4px 4px 0 0;
+        box-shadow: none;
+      }
+      /* Desktop control: crosshair eyes. */
+      body.control .eye {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        box-sizing: border-box;
+        border: 1.5px solid var(--accent);
+        background: radial-gradient(circle, var(--accent) 1.2px, transparent 1.7px);
+        box-shadow: none;
+      }
+
+      .text {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .head {
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        color: var(--accent);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      body.waiting .head,
+      body.asleep .head {
+        color: var(--warn);
+      }
+      .head b {
+        font-weight: 600;
+      }
+      .head #what {
+        color: inherit;
+      }
+      .head #chat {
+        color: var(--muted);
+        letter-spacing: 0.04em;
+      }
+      .action {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      /* His six moons, the one in use lit. */
+      .moons {
+        flex: none;
+        display: none;
+        gap: 4px;
+        padding-right: 6px;
+      }
+      body.work .moons {
+        display: flex;
+      }
+      .moon {
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: var(--faint);
+        transition: background 0.3s;
+      }
+      .moon.lit {
+        background: var(--accent);
+        box-shadow: 0 0 6px var(--accent);
+      }
+
+      #stop {
+        flex: none;
+        display: none;
+        height: 34px;
+        padding: 0 16px;
+        border-radius: 999px;
+        border: 1px solid rgba(242, 184, 128, 0.7);
+        background: rgba(242, 184, 128, 0.14);
+        color: var(--warn);
+        font: inherit;
+        font-weight: 600;
+        letter-spacing: 0.12em;
+        cursor: pointer;
+      }
+      body.control #stop {
+        display: block;
+      }
+      #stop:hover {
+        background: rgba(242, 184, 128, 0.28);
+      }
+
+      /* The face pill's slide-up button (not on desktop control's pill: STOP must stay). */
+      #hide {
+        flex: none;
+        width: 22px;
+        height: 22px;
+        margin-left: -6px;
+        padding: 0;
+        border: 0;
+        border-radius: 50%;
+        background: transparent;
+        color: var(--muted);
+        font: inherit;
+        font-size: 13px;
+        line-height: 22px;
+        cursor: pointer;
+      }
+      #hide:hover {
+        background: rgba(168, 200, 232, 0.16);
+        color: var(--ink);
+      }
+      body.control #hide,
+      body.dot #hide {
+        display: none;
+      }
+      /* Sliding up out of view before the window shrinks to the arrow tab, and back down after. */
+      .pill {
+        transition: transform 0.22s ease-in;
+      }
+      body.sliding .pill {
+        transform: translateY(-120%);
+      }
+      body.arriving .pill {
+        animation: arrive 0.3s ease-out;
+      }
+      @keyframes arrive {
+        from {
+          transform: translateY(-120%);
+        }
+      }
+
+      /* Slid up: only a small arrow tab hanging from the top edge; amber when something waits for you. */
+      #tab {
+        display: none;
+        position: absolute;
+        inset: 0 0 2px;
+        border: 1px solid rgba(168, 200, 232, 0.45);
+        border-top: 0;
+        border-radius: 0 0 10px 10px;
+        background: rgba(16, 24, 34, 0.88);
+        color: var(--accent);
+        font: inherit;
+        font-size: 12px;
+        line-height: 18px;
+        padding: 0;
+        cursor: pointer;
+      }
+      #tab:hover {
+        background: rgba(22, 32, 44, 0.95);
+      }
+      body.collapsed #tab {
+        display: block;
+      }
+      body.collapsed .pill {
+        display: none;
+      }
+      body.collapsed.waiting #tab,
+      body.collapsed.dot #tab,
+      body.collapsed.asleep #tab {
+        color: var(--warn);
+        border-color: rgba(242, 184, 128, 0.6);
+      }
+
+      /* A long wait shrinks to a dot: just the amber face. */
+      body.dot .pill {
+        padding: 0;
+        justify-content: center;
+      }
+      body.dot .text,
+      body.dot .moons {
+        display: none;
+      }
+
+      body.still *,
+      body.still *::before {
+        animation: none !important;
+        transition: none !important;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          animation: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body class="control">
+    <div class="pill" id="pill">
+      <div class="face">
+        <div class="eyes">
+          <div class="eye"></div>
+          <div class="eye"></div>
+        </div>
+        <div class="z">z</div>
+      </div>
+      <div class="text">
+        <div class="head"><b>HARV</b><span id="what"></span><span id="chat"></span></div>
+        <div class="action" id="action">…</div>
+      </div>
+      <div class="moons" id="moons"></div>
+      <button id="stop" type="button" title="Stop the chat that's using your desktop">STOP</button>
+      <button id="hide" type="button" title="Slide up (a small arrow stays at the top)" aria-label="Slide up">︿</button>
+    </div>
+    <button id="tab" type="button" title="Show Harv again" aria-label="Show Harv again">﹀</button>
+    <script>
+      const MOONS = ['memory', 'files', 'shell', 'web', 'helpers', 'desktop'];
+      const moons = document.getElementById('moons');
+      for (const m of MOONS) {
+        const d = document.createElement('div');
+        d.className = 'moon';
+        d.dataset.moon = m;
+        d.title = m;
+        moons.appendChild(d);
+      }
+      const HEAD = {
+        control: 'IS USING YOUR DESKTOP',
+        work: '',
+        waiting: 'NEEDS YOU',
+        dot: '',
+        asleep: 'IS ASLEEP',
+        notice: '',
+      };
+      const what = document.getElementById('what');
+      const chat = document.getElementById('chat');
+      const action = document.getElementById('action');
+      const pill = document.getElementById('pill');
+      // From the app (pill.rs): { mode, text, chat, more?, moon?, still? }.
+      let wasCollapsed = false;
+      window.setPill = (p) => {
+        const mode = p.mode || 'control';
+        const collapsed = !!p.collapsed && mode !== 'control';
+        // Coming back down from the arrow tab: slide in from above.
+        const arriving = wasCollapsed && !collapsed;
+        wasCollapsed = collapsed;
+        document.body.className = `${mode}${p.still ? ' still' : ''}${collapsed ? ' collapsed' : ''}${arriving ? ' arriving' : ''}`;
+        document.getElementById('tab').title = `Show Harv again (${p.text || ''}${p.chat ? ` · ${p.chat}` : ''})`;
+        what.textContent = HEAD[mode] ? ` ${HEAD[mode]}` : '';
+        chat.textContent = [p.chat ? ` · ${p.chat}` : '', p.more ? ` +${p.more}` : ''].join('');
+        action.textContent = p.text || '…';
+        pill.title = mode === 'control' ? p.text || '' : `${p.text || ''}${p.chat ? ` · ${p.chat}` : ''} (click to open)`;
+        for (const d of moons.children) d.classList.toggle('lit', d.dataset.moon === p.moon);
+      };
+      if (window.__pill) window.setPill(window.__pill);
+      const invoke = (cmd, args) => window.__TAURI_INTERNALS__?.invoke(cmd, args);
+      // ︿: slide up, then the app shrinks the window to the arrow tab at the top edge.
+      document.getElementById('hide').addEventListener('click', (e) => {
+        e.stopPropagation();
+        const still = document.body.classList.contains('still');
+        document.body.classList.add('sliding');
+        setTimeout(() => invoke('pill_collapse', { collapsed: true }), still ? 0 : 230);
+      });
+      document.getElementById('tab').addEventListener('click', () => invoke('pill_collapse', { collapsed: false }));
+      document.getElementById('stop').addEventListener('click', (e) => {
+        e.stopPropagation();
+        invoke('pill_stop');
+      });
+      // A click anywhere on the face pill opens its chat (never during desktop control: that pill only has STOP).
+      pill.addEventListener('click', () => {
+        if (!document.body.classList.contains('control')) invoke('pill_open');
+      });
+    </script>
+  </body>
+</html>

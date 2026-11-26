@@ -1,0 +1,1164 @@
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
+import type { ChatServerMessage, EffortLevel, Project } from '@harv/shared';
+import { afterAll, describe, expect, it, vi } from 'vitest';
+import type { SessionHooks } from './session.ts';
+
+const home = mkdtempSync(join(tmpdir(), 'harv-manager-'));
+vi.stubEnv('HARV_HOME', home);
+afterAll(() => rmSync(home, { recursive: true, force: true }));
+
+/** Stands in for a Claude Code session: records what it was sent, finishes turns on demand. */
+class FakeSession {
+  static all = new Map<string, FakeSession>();
+  busy = false;
+  toolRunning = false;
+  sent: { content: unknown; model: string; effort: EffortLevel; raw?: boolean }[] = [];
+
+  constructor(
+    readonly tabId: string,
+    _model: string,
+    _effort: EffortLevel,
+    private emit: (msg: ChatServerMessage) => void,
+    readonly hooks: SessionHooks,
+    _store?: unknown,
+    _gate?: unknown,
+    readonly start: { resume?: string; resumeAt?: string; chainEnd?: string; planning?: boolean } = {},
+    _delegate?: unknown,
+    readonly mode: { project?: Project } = {},
+  ) {
+    FakeSession.all.set(tabId, this);
+    this.chain = start.resumeAt ?? start.chainEnd;
+  }
+
+  private chain: string | undefined;
+  rewound: string[] = [];
+  planning: boolean[] = [];
+
+  /** The "[This reply runs on …]" notes, set aside so the tests read the message itself. */
+  pickNotes: string[] = [];
+
+  async send(content: unknown, model: string, effort: EffortLevel, raw = false) {
+    this.busy = true;
+    const pick = /^\[This reply runs on [^\]]*\]\n\n/;
+    if (typeof content === 'string' && pick.test(content)) {
+      this.pickNotes.push(content.match(pick)![0]);
+      content = content.replace(pick, '');
+    } else if (Array.isArray(content) && pick.test((content[0] as { text?: string }).text ?? '')) {
+      this.pickNotes.push((content[0] as { text: string }).text);
+      content = content.slice(1);
+    }
+    this.sent.push({ content, model, effort, raw });
+    const uuid = `${this.tabId}-msg-${this.sent.length}`;
+    const mark = { uuid, ...(this.chain ? { forkAt: this.chain } : {}) };
+    // The reply is the conversation's next entry.
+    this.chain = `${uuid}-reply`;
+    return mark;
+  }
+
+  async rewindFiles(uuid: string) {
+    this.rewound.push(uuid);
+    return { canRewind: true, filesChanged: ['C:/x/a.txt'] };
+  }
+
+  async setPlanning(on: boolean) {
+    this.planning.push(on);
+  }
+
+  context(tokens: number) {
+    this.emit({ type: 'chat.context', tabId: this.tabId, tokens });
+  }
+
+  reply(text: string) {
+    this.emit({ type: 'chat.assistant', tabId: this.tabId, text });
+  }
+
+  finish(ok = true) {
+    this.busy = false;
+    this.emit({ type: 'chat.done', tabId: this.tabId, ok, stopped: false, usage: { inputTokens: 10, outputTokens: 5, durationMs: 1 } });
+  }
+
+  async stop() {
+    if (!this.busy) return;
+    this.busy = false;
+    this.emit({ type: 'chat.done', tabId: this.tabId, ok: false, stopped: true });
+  }
+  close() {}
+  tasks() {
+    return [];
+  }
+  async stopTask() {}
+
+  retuned: { model: string; effort: EffortLevel }[] = [];
+  async retune(model: string, effort: EffortLevel) {
+    this.retuned.push({ model, effort });
+  }
+
+  /** Messages handed over mid-reply (`fold`), and whether this CLI reports taking them. */
+  folds: { id: string; content: unknown }[] = [];
+  lifecycle = true;
+  fold(id: string, content: unknown) {
+    if (!this.busy || !this.lifecycle) return false;
+    this.folds.push({ id, content });
+    return true;
+  }
+
+  /** The reply starts a tool. */
+  tool() {
+    this.toolRunning = true;
+    this.hooks.onToolUse?.();
+  }
+
+  /** Claude takes a handed-over message: mid-reply, or as its own turn after the reply ended. */
+  take(id: string, newTurn = false) {
+    if (newTurn) this.busy = true;
+    this.hooks.onFolded?.(id, newTurn);
+  }
+
+  /** The Claude process dies under the session (a crash, a refusal). */
+  die() {
+    if (this.busy) this.emit({ type: 'chat.done', tabId: this.tabId, ok: false, stopped: false });
+    this.busy = false;
+    this.hooks.onEnded?.();
+  }
+}
+
+vi.mock('./session.ts', () => ({ ChatSession: FakeSession }));
+// The gate's "did the job ask for it" check is a Haiku call: never a real one in tests (2026-11-26, it answered yes).
+vi.mock('../safety/judge.ts', async (actual) => ({
+  ...(await actual<typeof import('../safety/judge.ts')>()),
+  askedOutright: vi.fn(async () => false),
+}));
+
+const { ChatManager, ideaLine, lastTaggedRun, SPOKEN_ADDITION, unnamed } = await import('./manager.ts');
+const { SafetyGate } = await import('../safety/gate.ts');
+const { ActionStore } = await import('../store/actions.ts');
+const { ChatStore } = await import('../store/chats.ts');
+const { RouteStore } = await import('../store/routes.ts');
+const { Router } = await import('../router/router.ts');
+const { UsageMeter } = await import('../usage/meter.ts');
+
+function setup(classify: ConstructorParameters<typeof Router>[1] = async () => null) {
+  const sent: ChatServerMessage[] = [];
+  const store = new ChatStore(':memory:');
+  const routes = new RouteStore(':memory:');
+  const gate = new SafetyGate(new ActionStore(':memory:'), { broadcast: () => {}, notice: () => {}, onChange: () => {} });
+  const meter = new UsageMeter(
+    { onChange: () => {}, onResume: () => void chats.flushQueue() },
+    () => routes.summary(),
+    async () => undefined,
+  );
+  const chats = new ChatManager(
+    store,
+    gate,
+    new Router(routes, classify),
+    meter,
+    (m) => sent.push(m as ChatServerMessage),
+    () => {},
+  );
+  const notices = (tabId: string) => sent.flatMap((m) => (m.type === 'chat.notice' && m.tabId === tabId ? [m.message] : []));
+  return { chats, meter, routes, store, notices, sent };
+}
+
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
+describe('chat names', () => {
+  it('counts a first-message title as no name yet, a short name as named', () => {
+    expect(unnamed(undefined)).toBe(true);
+    expect(unnamed('check the 3 new files in doownloads if …')).toBe(true);
+    expect(unnamed('PS5 rental for GTA6')).toBe(true);
+    expect(unnamed('Glass watch face')).toBe(false);
+    expect(unnamed('Zajtrajšie počasie')).toBe(false);
+  });
+});
+
+describe('the model pick, told to Claude', () => {
+  it('says what runs and who picked it when the pick changes, and stays quiet when it does not', async () => {
+    const { chats } = setup();
+    await chats.send('pk', 'hello', 'sonnet', 'medium');
+    const s = FakeSession.all.get('pk')!;
+    s.finish();
+    await chats.send('pk', 'again', 'sonnet', 'medium');
+    s.finish();
+    await chats.send('pk', 'now bigger', 'opus', 'high');
+    s.finish();
+    expect(s.pickNotes).toEqual([
+      '[This reply runs on sonnet·medium, picked by the user: your pick.]\n\n',
+      '[This reply runs on opus·high, picked by the user: your pick.]\n\n',
+    ]);
+    expect(s.sent.map((m) => m.content)).toEqual(['hello', 'again', 'now bigger']);
+  });
+});
+
+describe('signing off', () => {
+  it('puts the wrap-up note (memory, learn-from-session) in front of "bye" for Claude, not in the chat', async () => {
+    const { chats, store } = setup();
+    await chats.send('bye1', 'bye', 'auto', 'medium');
+    await settle();
+    const s = FakeSession.all.get('bye1')!;
+    expect(String(s.sent.at(-1)!.content)).toMatch(/learn-from-session[\s\S]*\nbye$/);
+    expect(s.sent.at(-1)!.model).toMatch(/sonnet/);
+    expect(store.snapshot('bye1')?.lines.map((l) => l.text)).toEqual(['bye']);
+    s.finish();
+    await chats.send('bye1', 'thanks', 'auto', 'medium');
+    await settle();
+    expect(String(s.sent.at(-1)!.content)).not.toMatch(/learn-from-session/);
+  });
+});
+
+describe('limit handling', () => {
+  it('queues messages while paused and sends them in order after the reset', async () => {
+    const { chats, meter, notices } = setup();
+    await chats.send('a', 'hello there', 'sonnet', 'medium');
+    FakeSession.all.get('a')!.finish();
+
+    meter.pause(Date.now() + 60_000);
+    await chats.send('a', 'first queued', 'sonnet', 'medium');
+    await chats.send('b', 'second queued', 'haiku', 'low');
+    expect(chats.status).toBe('paused');
+    expect(meter.snapshot().queued).toBe(2);
+    expect(notices('a').at(-1)).toMatch(/queued/);
+    expect(FakeSession.all.get('a')!.sent).toHaveLength(1);
+
+    // Pretend the reset happened.
+    (meter as unknown as { pausedUntil: number | null }).pausedUntil = null;
+    const flushing = chats.flushQueue();
+    await settle();
+    expect(FakeSession.all.get('a')!.sent.at(-1)!.content).toBe('first queued');
+    expect(FakeSession.all.has('b')).toBe(false);
+    FakeSession.all.get('a')!.finish();
+    await settle();
+    expect(FakeSession.all.get('b')!.sent.at(-1)).toMatchObject({ content: 'second queued', model: 'haiku', effort: 'low' });
+    FakeSession.all.get('b')!.finish();
+    await flushing;
+    expect(meter.snapshot().queued).toBe(0);
+  });
+
+  it('continues a turn the limit cut off, at the same model·effort', async () => {
+    const { chats, meter, notices } = setup();
+    await chats.send('c', 'write the report', 'opus', 'high');
+    const session = FakeSession.all.get('c')!;
+    const rejected: SDKRateLimitInfo = { status: 'rejected', rateLimitType: 'five_hour', resetsAt: Math.floor(Date.now() / 1000) + 600 };
+    session.hooks.onRateLimit(rejected);
+    session.finish(false);
+    expect(meter.paused).toBe(true);
+    expect(notices('c').at(-1)).toMatch(/pick this up where it left off/);
+
+    (meter as unknown as { pausedUntil: number | null }).pausedUntil = null;
+    const flushing = chats.flushQueue();
+    await settle();
+    expect(session.sent.at(-1)).toMatchObject({ model: 'opus', effort: 'high' });
+    expect(String(session.sent.at(-1)!.content)).toMatch(/continue where you left off/);
+    session.finish();
+    await flushing;
+  });
+
+  it('Stop cancels a tab’s queued messages', async () => {
+    const { chats, meter, notices } = setup();
+    meter.pause(Date.now() + 60_000);
+    await chats.send('d', 'one', 'sonnet', 'medium');
+    await chats.send('d', 'two', 'sonnet', 'medium');
+    await chats.stop('d');
+    expect(meter.snapshot().queued).toBe(0);
+    expect(notices('d').at(-1)).toBe('Removed 2 queued messages.');
+  });
+
+  it('logs every turn with its tokens for Harv’s own stats', async () => {
+    const { chats, routes } = setup();
+    await chats.send('e', 'hello there', 'sonnet', 'medium');
+    FakeSession.all.get('e')!.finish();
+    expect(routes.summary()).toMatchObject({ turnsToday: 1, inputTokensToday: 10, outputTokensToday: 5 });
+    expect(routes.summary().split).toEqual([{ model: 'sonnet', effort: 'medium', turns: 1, harder: 0 }]);
+  });
+});
+
+describe('chat names', () => {
+  it('names a chat from the classifier, until the user renames it', async () => {
+    let title = 'Week plan';
+    const classify = vi.fn(async (..._args: unknown[]) => ({
+      category: 'planning',
+      difficulty: 3 as const,
+      stakes: 'normal' as const,
+      ambiguous: false,
+      title,
+    }));
+    const { chats, store, sent } = setup(classify);
+
+    await chats.send('n', 'plan my week around the deadlines in notes.md', 'auto', 'medium');
+    expect(store.title('n')).toBe('Week plan');
+    expect(sent).toContainEqual({ type: 'chat.renamed', tabId: 'n', title: 'Week plan' });
+    // The first message's own text isn't offered as a title to keep.
+    expect(classify.mock.calls[0]![3]).toBeUndefined();
+    FakeSession.all.get('n')!.finish();
+
+    chats.rename('n', '  My   week ');
+    expect(store.title('n')).toBe('My week');
+    title = 'Something else';
+    await chats.send('n', 'new question: now write a poem about tides and the moon', 'auto', 'medium');
+    expect(store.title('n')).toBe('My week');
+    FakeSession.all.get('n')!.finish();
+  });
+
+  it('names a new chat in manual mode with one classifier call', async () => {
+    const classify = vi.fn(async () => ({ category: 'chat', difficulty: 1, stakes: 'normal', ambiguous: false, title: 'Greeting' }));
+    const { chats, store } = setup(classify as unknown as ConstructorParameters<typeof Router>[1]);
+    await chats.send('m', 'hello there in manual mode', 'sonnet', 'medium');
+    await vi.waitFor(() => expect(store.title('m')).toBe('Greeting'));
+    expect(classify).toHaveBeenCalledTimes(1);
+    FakeSession.all.get('m')!.finish();
+  });
+
+  it('saves a name given to a tab before its first message', () => {
+    const { chats, store } = setup();
+    chats.rename('blank', 'Ideas');
+    expect(store.title('blank')).toBe('Ideas');
+    expect(store.titleLocked('blank')).toBe(true);
+  });
+
+  it('forgets a chat without messages when its tab closes, keeps one with messages', () => {
+    const { chats, store } = setup();
+    chats.rename('tool', 'Terminal');
+    chats.close('tool');
+    expect(store.exists('tool')).toBe(false);
+    store.ensureChat('talk', 'Weather');
+    store.addLine('talk', { kind: 'you', text: 'rain?' });
+    chats.close('talk');
+    expect(store.exists('talk')).toBe(true);
+  });
+
+  it('tells every window a closed tab is gone, not only the one that closed it', () => {
+    const { chats, store, sent } = setup();
+    store.ensureChat('talk', 'Weather');
+    store.addLine('talk', { kind: 'you', text: 'rain?' });
+    chats.close('talk');
+    expect(sent.filter((m) => m.type === 'chat.removed' && m.tabId === 'talk')).toHaveLength(1);
+  });
+});
+
+describe('hand-off between chats', () => {
+  it('runs the task in a new tab and brings the answer back', async () => {
+    const { chats, store } = setup();
+    await chats.send('from', 'ask a new tab to check the weather', 'sonnet', 'medium');
+    const pending = chats.delegate('from', { title: 'Weather', message: 'What is the weather in Bratislava?', wait: true });
+    await settle();
+    await settle();
+    const target = [...FakeSession.all.values()].find((s) => s.tabId !== 'from' && String(s.sent[0]?.content).includes('Bratislava'))!;
+    expect(String(target.sent[0]!.content)).toMatch(/^\[Handed over from your other chat/);
+    expect(store.title(target.tabId)).toBe('Weather');
+    target.reply('Sunny, 18°C.');
+    target.finish();
+    expect(await pending).toContain('Sunny, 18°C.');
+    expect(store.snapshot(target.tabId)!.lines.map((l) => l.kind)).toEqual(['notice', 'you', 'harv']);
+  });
+
+  it('counts nothing in a handed-over message as the user asking (sending, desktop, overrides)', async () => {
+    const { chats } = setup();
+    await chats.send('from2', 'sort out my disks', 'sonnet', 'medium');
+    void chats.delegate('from2', { title: 'Disks', message: 'wipe disk 2 and email Peter the result', wait: false });
+    await settle();
+    await settle();
+    const target = [...FakeSession.all.values()].find((s) => String(s.sent[0]?.content).includes('wipe disk 2'))!;
+    const gate = (chats as unknown as { gate: InstanceType<typeof SafetyGate> }).gate;
+    const out = await gate.preToolUse(
+      target.tabId,
+      'PowerShell',
+      { command: 'Get-Disk 2 | Clear-Disk -RemoveData -Confirm:$false' },
+      'h1',
+      new AbortController().signal,
+    );
+    // Refused outright, no override card: Harv wrote this message, not the user.
+    expect(JSON.stringify(out)).toMatch(/"permissionDecision":"deny"/);
+    expect(gate.waiting).toBe(0);
+  });
+
+  it('refuses to hand back to a chat that is waiting, and to a busy chat', async () => {
+    const { chats, store } = setup();
+    store.ensureChat('x', 'X');
+    store.ensureChat('y', 'Y');
+    const waiting = chats.delegate('x', { to: 'y', message: 'do a thing', wait: true });
+    await settle();
+    await settle();
+    expect(await chats.delegate('y', { to: 'x', message: 'and back', wait: true })).toMatch(/wait on each other/);
+    expect(await chats.delegate('z', { to: 'y', message: 'me too', wait: true })).toMatch(/busy/);
+    FakeSession.all.get('y')!.finish();
+    await waiting;
+  });
+
+  it('can start work without waiting', async () => {
+    const { chats, store } = setup();
+    store.ensureChat('p', 'P');
+    store.ensureChat('q', 'Q');
+    const result = await chats.delegate('p', { to: 'q', message: 'long job', wait: false });
+    expect(result).toMatch(/Started in the "Q" tab/);
+    expect(FakeSession.all.get('q')!.busy).toBe(true);
+    FakeSession.all.get('q')!.finish();
+  });
+});
+
+describe('chat names with a one-message override', () => {
+  it('still names a new chat sent as "/haiku …" on AUTO', async () => {
+    const classify = vi.fn(async (..._args: unknown[]) => ({
+      category: 'chat',
+      difficulty: 1 as const,
+      stakes: 'normal' as const,
+      ambiguous: false,
+      title: 'Test file cleanup',
+    }));
+    const { chats, store } = setup(classify);
+    await chats.send('o', '/haiku /low delete the test file', 'auto', 'medium');
+    await vi.waitFor(() => expect(store.title('o')).toBe('Test file cleanup'));
+    FakeSession.all.get('o')!.finish();
+  });
+});
+
+describe('project mode', () => {
+  it('moves a chat into a project: a new session in the folder, with the conversation so far', async () => {
+    const { chats, store } = setup();
+    await chats.send('p', 'we talked about a todo app', 'sonnet', 'medium');
+    FakeSession.all.get('p')!.reply('Sounds good.');
+    FakeSession.all.get('p')!.finish();
+    const folder = mkdtempSync(join(tmpdir(), 'harv-proj-'));
+    expect(chats.addProject(folder)).toBeUndefined();
+    const project = store.projects()[0]!;
+    expect(chats.setProject('p', project.id)).toBeUndefined();
+    expect(store.projectOf('p')?.path).toBe(project.path);
+
+    await chats.send('p', 'start with the data model', 'sonnet', 'medium');
+    const session = FakeSession.all.get('p')!;
+    expect(session.mode.project?.path).toBe(project.path);
+    const first = String(session.sent[0]!.content);
+    expect(first).toContain(`moved into the project "${project.name}"`);
+    expect(first).toContain('we talked about a todo app');
+    expect(first).toContain('start with the data model');
+    session.finish();
+    rmSync(folder, { recursive: true, force: true });
+  });
+
+  it('starts a new project: folder, git, CLAUDE.md, and the chat moves in', async () => {
+    const projectsRoot = mkdtempSync(join(tmpdir(), 'harv-projects-'));
+    writeFileSync(join(home, 'settings.json'), JSON.stringify({ projectsDir: projectsRoot }));
+    try {
+      const { chats, store } = setup();
+      // Never the real gh: a test must not make GitHub repos.
+      const made: [string, string, string][] = [];
+      chats.createRepo = async (path, name, visibility) => {
+        made.push([path, name, visibility]);
+        return `https://github.com/me/${name}.git`;
+      };
+      type Start = (t: string, n: string, d: string, v: 'private' | 'public') => Promise<string>;
+      const tools = (chats as unknown as { projectTools: { start: Start } }).projectTools;
+      const reply = await tools.start('s', 'weather-app', 'A small weather dashboard.', 'private');
+      const folder = join(projectsRoot, 'weather-app');
+      expect(reply).toContain(folder);
+      expect(reply).toContain('private GitHub repo is https://github.com/me/weather-app.git');
+      expect(made).toEqual([[folder, 'weather-app', 'private']]);
+      expect(readFileSync(join(folder, 'CLAUDE.md'), 'utf8')).toContain('A small weather dashboard.');
+      expect(existsSync(join(folder, '.git'))).toBe(true);
+      expect(store.projectOf('s')?.name).toBe('weather-app');
+      expect(store.projectOf('s')?.remote).toBe('https://github.com/me/weather-app.git');
+      // A second time, the folder exists: Harv has to ask.
+      expect(await tools.start('t', 'weather-app', 'again', 'public')).toContain('already exists');
+      // gh failing (not logged in) leaves the project on this device, and says how to fix it.
+      chats.createRepo = async () => {
+        throw new Error('gh: not logged in\nrun gh auth login');
+      };
+      const failed = await tools.start('u', 'notes', 'Notes.', 'public');
+      expect(failed).toContain('Making its GitHub repo failed (gh: not logged in)');
+      expect(failed).toContain('gh repo create notes --public --source . --push');
+      expect(store.projectOf('u')?.remote).toBeUndefined();
+      mkdirSync(join(projectsRoot, 'empty'), { recursive: true });
+      // remove_project unlists it (the 2026-11-14 chat edited harv.db by hand for this); the folder stays.
+      const remove = (chats as unknown as { projectTools: { remove: (n: string) => string } }).projectTools.remove;
+      expect(remove('nope')).toContain('Nothing removed');
+      expect(remove('Notes')).toContain('off the project list');
+      expect(store.projects().map((p) => p.name)).toEqual(['weather-app']);
+      expect(store.projectOf('u')).toBeUndefined();
+      expect(existsSync(join(projectsRoot, 'notes'))).toBe(true);
+    } finally {
+      rmSync(join(home, 'settings.json'), { force: true });
+      rmSync(projectsRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('messages typed while Harv works', () => {
+  it('queues them and runs them in order when the turn ends', async () => {
+    const { chats, sent } = setup();
+    await chats.send('q', 'first', 'sonnet', 'medium');
+    const session = FakeSession.all.get('q')!;
+    await chats.send('q', 'second', 'sonnet', 'medium');
+    await chats.send('q', 'third', 'haiku', 'low');
+    expect(session.sent.map((s) => s.content)).toEqual(['first']);
+    const queued = sent.filter((m) => m.type === 'chat.queued');
+    expect(queued.at(-1)).toMatchObject({ items: [{ text: 'second' }, { text: 'third' }] });
+    expect(
+      chats
+        .openChats()
+        .find((c) => c.id === 'q')
+        ?.queued?.map((q) => q.text),
+    ).toEqual(['second', 'third']);
+
+    session.finish();
+    await settle();
+    expect(session.sent.map((s) => s.content)).toEqual(['first', 'second']);
+    expect(sent.some((m) => m.type === 'chat.line' && m.tabId === 'q' && m.line.kind === 'you' && m.line.text === 'second')).toBe(true);
+    session.finish();
+    await settle();
+    expect(session.sent.at(-1)).toMatchObject({ content: 'third', model: 'haiku', effort: 'low' });
+    expect(sent.filter((m) => m.type === 'chat.queued').at(-1)).toMatchObject({ items: [] });
+  });
+
+  it('can drop a queued message before it runs', async () => {
+    const { chats } = setup();
+    await chats.send('u', 'first', 'sonnet', 'medium');
+    await chats.send('u', 'oops', 'sonnet', 'medium');
+    const [item] = chats.openChats().find((c) => c.id === 'u')!.queued!;
+    chats.unqueue('u', item!.id);
+    FakeSession.all.get('u')!.finish();
+    await settle();
+    expect(FakeSession.all.get('u')!.sent.map((s) => s.content)).toEqual(['first']);
+  });
+
+  it('"send now" stops the reply and runs that message first', async () => {
+    const { chats } = setup();
+    await chats.send('n', 'first', 'sonnet', 'medium');
+    await chats.send('n', 'later', 'sonnet', 'medium');
+    await chats.send('n', 'urgent', 'sonnet', 'medium');
+    const urgent = chats
+      .openChats()
+      .find((c) => c.id === 'n')!
+      .queued!.find((q) => q.text === 'urgent')!;
+    await chats.sendNow('n', urgent.id);
+    await settle();
+    const session = FakeSession.all.get('n')!;
+    expect(session.sent.map((s) => s.content)).toEqual(['first', 'urgent']);
+    expect(
+      chats
+        .openChats()
+        .find((c) => c.id === 'n')!
+        .queued!.map((q) => q.text),
+    ).toEqual(['later']);
+  });
+});
+
+describe('/btw side questions', () => {
+  // Audit B1: a /btw answer's tag isn't the chat's last turn.
+  it('skips /btw answers when reading the last model from saved tags', () => {
+    const lines = [
+      { kind: 'harv', tag: 'opus·high' },
+      { kind: 'you', tag: null },
+      { kind: 'harv', tag: 'btw·sonnet' },
+    ];
+    expect(lastTaggedRun(lines)).toEqual({ model: 'opus', effort: 'high' });
+    expect(lastTaggedRun([{ kind: 'harv', tag: 'btw·sonnet' }])).toBeUndefined();
+  });
+
+  it('answers right away, even mid-reply, without queueing or touching the chat', async () => {
+    const { chats, sent } = setup();
+    const asked: { question: string; resume?: string }[] = [];
+    chats.ask = async (question, _model, _chat, resume) => {
+      asked.push({ question, resume });
+      return 'It means the file is locked.';
+    };
+    await chats.send('b', 'first', 'sonnet', 'medium');
+    const session = FakeSession.all.get('b')!;
+    session.hooks.onSessionId('sess-1');
+    await chats.send('b', '/btw what does EBUSY mean?', 'sonnet', 'medium');
+    expect(asked).toEqual([{ question: 'what does EBUSY mean?', resume: 'sess-1' }]);
+    expect(session.sent.map((s) => s.content)).toEqual(['first']);
+    expect(chats.openChats().find((c) => c.id === 'b')?.queued).toBeUndefined();
+    const lines = sent.flatMap((m) => (m.type === 'chat.line' && m.tabId === 'b' ? [m.line] : []));
+    expect(lines.map((l) => [l.kind, l.text])).toEqual([
+      ['you', '/btw what does EBUSY mean?'],
+      ['harv', 'It means the file is locked.'],
+    ]);
+    expect(lines[1]!.tag).toMatch(/^btw·/);
+  });
+
+  it('says how to use it when the question is missing', async () => {
+    const { chats, notices } = setup();
+    chats.ask = async () => 'never';
+    await chats.send('e', '/btw', 'sonnet', 'medium');
+    expect(notices('e').at(-1)).toMatch(/side question/);
+  });
+
+  it('says why when it could not answer (it used to say only "Couldn’t answer")', async () => {
+    const { chats, notices } = setup();
+    chats.ask = async () => ({ error: 'error_max_turns' });
+    await chats.send('x', '/btw what is this?', 'sonnet', 'medium');
+    expect(notices('x').at(-1)).toBe('Couldn’t answer that side question (error_max_turns). Try again, or ask it as a normal message.');
+  });
+});
+
+describe('slash commands', () => {
+  it('sends a Claude Code command as typed, without the router, at the last model', async () => {
+    const { chats } = setup();
+    chats.catalog = { plan: 'Claude Pro', models: [], commands: [{ name: 'compact', description: '', argumentHint: '' }] };
+    await chats.send('s', 'hello', 'haiku', 'low');
+    const session = FakeSession.all.get('s')!;
+    session.finish();
+    await chats.send('s', '/compact keep the plan', 'auto', 'medium');
+    expect(session.sent.at(-1)).toEqual({ content: '/compact keep the plan', model: 'haiku', effort: 'low', raw: true });
+  });
+
+  it('/clear empties the tab and its saved lines once it worked (the user’s wish)', async () => {
+    const { chats, sent } = setup();
+    chats.catalog = { plan: 'Claude Pro', models: [], commands: [{ name: 'clear', description: '', argumentHint: '' }] };
+    await chats.send('c', 'hello', 'haiku', 'low');
+    const session = FakeSession.all.get('c')!;
+    session.reply('Hi!');
+    session.finish();
+    await chats.send('c', '/clear', 'auto', 'medium');
+    expect(sent.some((m) => m.type === 'chat.cleared')).toBe(false);
+    session.finish();
+    expect(sent.filter((m) => m.type === 'chat.cleared')).toEqual([{ type: 'chat.cleared', tabId: 'c' }]);
+    expect(chats.openChats().find((c) => c.id === 'c')?.lines).toEqual([]);
+    // Other commands leave the log alone.
+    chats.catalog.commands.push({ name: 'compact', description: '', argumentHint: '' });
+    await chats.send('c', 'again', 'haiku', 'low');
+    session.finish();
+    await chats.send('c', '/compact', 'auto', 'medium');
+    session.finish();
+    expect(chats.openChats().find((c) => c.id === 'c')?.lines.length).toBeGreaterThan(0);
+  });
+
+  // The full review, S23: a held action outlived /clear, and a later "ok" granted it.
+  it('/clear drops what was waiting for the user’s yes, and says so', { timeout: 15_000 }, async () => {
+    const { chats, notices } = setup();
+    chats.catalog = { plan: 'Claude Pro', models: [], commands: [{ name: 'clear', description: '', argumentHint: '' }] };
+    await chats.send('hc', 'tidy up my PC', 'sonnet', 'medium');
+    const session = FakeSession.all.get('hc')!;
+    const gate = (chats as unknown as { gate: InstanceType<typeof SafetyGate> }).gate;
+    await gate.preToolUse('hc', 'PowerShell', { command: 'Stop-Service Spooler' }, 'held1', new AbortController().signal);
+    expect(gate.heldCount('hc')).toBe(1);
+    session.finish();
+    await chats.send('hc', '/clear', 'auto', 'medium');
+    session.finish();
+    expect(gate.heldCount('hc')).toBe(0);
+    expect(notices('hc').some((n) => n.includes('Dropped what was waiting for your yes'))).toBe(true);
+  });
+
+  it('refuses commands that could bill or only work in a terminal, and leaves other slashes alone', async () => {
+    const { chats, notices } = setup();
+    chats.catalog = { plan: 'Claude Pro', models: [], commands: [] };
+    await chats.send('r', '/ultrareview', 'sonnet', 'medium');
+    expect(notices('r').at(-1)).toMatch(/doesn’t run \/ultrareview.*subscription/);
+    expect(FakeSession.all.get('r')).toBeUndefined();
+    await chats.send('r2', '/c/Users/me/notes.txt what is in it', 'sonnet', 'medium');
+    expect(FakeSession.all.get('r2')!.sent[0]!.raw).toBe(false);
+  });
+
+  it('a mistyped /word sends nothing, loads no skills and offers the nearest command (the user’s rule, 2026-11-09)', async () => {
+    const { chats, notices, sent } = setup();
+    chats.catalog = { plan: 'Claude Pro', models: [], commands: [{ name: 'deslop', description: '', argumentHint: '' }] };
+    await chats.send('t', '/reprot the explorer forgets my folder', 'sonnet', 'medium');
+    expect(notices('t').at(-1)).toBe(
+      'There’s no /reprot command, so nothing was sent. Did you mean /report? To send it as a plain message, take the slash off.',
+    );
+    expect(FakeSession.all.get('t')).toBeUndefined();
+    expect(notices('t').some((n) => /all your skills/.test(n))).toBe(false);
+    expect(sent.some((m) => m.type === 'chat.done' && m.tabId === 't')).toBe(true);
+    // A real skill is no typo: it goes to Claude Code.
+    await chats.send('t', '/deslop', 'sonnet', 'medium');
+    expect(notices('t').filter((n) => /There’s no/.test(n))).toHaveLength(1);
+    expect(FakeSession.all.get('t')!.sent.at(-1)).toMatchObject({ content: '/deslop', raw: true });
+  });
+});
+
+describe('context meter', () => {
+  it("keeps each message's own context, not the turn's sum over every API call", async () => {
+    const { chats, store, sent } = setup();
+    await chats.send('ctx', 'look around the repo', 'sonnet', 'medium');
+    const session = FakeSession.all.get('ctx')!;
+    session.context(31_000);
+    session.context(42_500);
+    session.finish(); // its usage sums all calls of the turn
+    expect(store.snapshot('ctx')!.context).toBe(42_500);
+    expect(sent.filter((m) => m.type === 'chat.context').map((m) => (m as { tokens: number }).tokens)).toEqual([31_000, 42_500]);
+  });
+});
+
+describe('/report', () => {
+  it('writes a dated one-line note to harv_report.md, without a model call, even mid-reply', async () => {
+    const { chats, store, sent } = setup();
+    const ideas = join(home, 'harv_report.md');
+    writeFileSync(ideas, '- an older note');
+    chats.ideasFile = ideas;
+    await chats.send('r', 'look at the stats panel', 'sonnet', 'medium');
+    store.setTitle('r', 'Stats', true);
+    await chats.send('r', '/report the GPU fan\n reads 0 rpm', 'sonnet', 'medium');
+    const text = readFileSync(ideas, 'utf8').split('\n');
+    expect(text[0]).toBe('- an older note');
+    expect(text[1]).toMatch(/^- \[\d{1,2} \w{3} \d{2}:\d{2} · .+ · Stats\] the GPU fan reads 0 rpm$/);
+    expect(text[2]).toBe('');
+    expect(FakeSession.all.get('r')!.sent).toHaveLength(1);
+    expect(sent.some((m) => m.type === 'chat.notice' && m.tabId === 'r' && m.message === 'Noted in harv_report.md.')).toBe(true);
+    expect(chats.openChats().find((c) => c.id === 'r')?.queued).toBeUndefined();
+    FakeSession.all.get('r')!.finish();
+  });
+
+  it('puts a skill review in harv_skills.md (with its header), not in the user’s report', () => {
+    const { chats } = setup();
+    const ideas = join(home, 'harv_report.md');
+    const skills = join(home, 'harv_skills.md');
+    writeFileSync(ideas, '- a bug\n');
+    rmSync(skills, { force: true });
+    chats.ideasFile = ideas;
+    chats.skillsFile = skills;
+    const tools = (chats as unknown as { projectTools: { report: (tab: string, note: string, skills?: boolean) => string } }).projectTools;
+    expect(tools.report('s', 'reel: some skill, skip (paid)', true)).toBe('Noted in harv_skills.md.');
+    expect(readFileSync(ideas, 'utf8')).toBe('- a bug\n');
+    const text = readFileSync(skills, 'utf8');
+    expect(text.startsWith('# Harv skills\n')).toBe(true);
+    expect(text.trimEnd().split('\n').at(-1)).toMatch(/\] reel: some skill, skip \(paid\)$/);
+  });
+
+  it('formats the note like the plan says', () => {
+    expect(ideaLine(' explorer   forgets\nthe folder ', new Date(2026, 9, 25, 13, 5), 'PC', 'Files  chat')).toBe(
+      '- [25 Oct 13:05 · PC · Files chat] explorer forgets the folder',
+    );
+  });
+});
+
+describe('/fresh', () => {
+  it('saves and summarizes in one turn, then the next message starts a new session from the summary', async () => {
+    const { chats, store, sent } = setup();
+    await chats.send('f', 'plan the radio app', 'sonnet', 'high');
+    const old = FakeSession.all.get('f')!;
+    old.hooks.onSessionId('session-1');
+    old.reply('Here is a plan.');
+    old.finish();
+
+    await chats.send('f', '/fresh', 'sonnet', 'medium');
+    expect(String(old.sent.at(-1)!.content)).toContain('[/fresh');
+    expect(old.sent.at(-1)).toMatchObject({ model: 'sonnet', effort: 'high' });
+    old.reply('Saved the stack choice to memory.');
+    old.reply('We are building a radio app. Next: the data model.');
+    old.finish();
+    await settle();
+    expect(store.getSession('f')).toBeNull();
+    expect(store.snapshot('f')!.lines.at(-1)).toMatchObject({ kind: 'notice', text: expect.stringContaining('— fresh session —') });
+    expect(sent.filter((m) => m.type === 'chat.context').at(-1)).toMatchObject({ tokens: 0 });
+
+    await chats.send('f', 'go on', 'sonnet', 'medium');
+    const next = FakeSession.all.get('f')!;
+    expect(next).not.toBe(old);
+    const first = String(next.sent[0]!.content);
+    expect(first).toContain('handoff summary from the previous session');
+    expect(first).toContain('We are building a radio app. Next: the data model.');
+    expect(first).not.toContain('Saved the stack choice');
+    expect(first.endsWith('go on')).toBe(true);
+    next.finish();
+  });
+
+  it('says a chat without a session is already fresh', async () => {
+    const { chats, notices } = setup();
+    await chats.send('g', '/fresh', 'sonnet', 'medium');
+    expect(notices('g').at(-1)).toMatch(/already fresh/);
+    expect(FakeSession.all.has('g')).toBe(false);
+  });
+});
+
+describe('found in the test pass (2026-10-25)', () => {
+  it('shows a turn Claude starts by itself as a turn, logged on its own (F1)', async () => {
+    const { chats, routes, sent } = setup();
+    await chats.send('auto', 'start the build in the background', 'sonnet', 'medium');
+    const session = FakeSession.all.get('auto')!;
+    session.finish();
+    const before = routes.summary();
+    // A background task finished: Claude Code starts a turn with no message from the user.
+    session.hooks.onAutoTurn!();
+    const started = sent.filter((m) => m.type === 'chat.started' && m.tabId === 'auto').at(-1);
+    expect(started).toMatchObject({ model: 'sonnet', effort: 'medium', reason: expect.stringContaining('background task') });
+    session.finish();
+    // Its own row: the first turn's tokens stay, this one's are added (they used to overwrite them).
+    const after = routes.summary();
+    expect(after.turnsToday).toBe(before.turnsToday + 1);
+    expect(after.inputTokensToday).toBe(before.inputTokensToday + 10);
+  });
+
+  it('sends a message that arrives right after a project switch to the new session, not the old one (F4)', async () => {
+    const { chats, store } = setup();
+    await chats.send('sw', 'we talked about a radio app', 'sonnet', 'medium');
+    const old = FakeSession.all.get('sw')!;
+    const folder = mkdtempSync(join(tmpdir(), 'harv-proj-'));
+    expect(chats.addProject(folder)).toBeUndefined();
+    // Mid-turn, the chat moves into the project (Harv's open_project); its session goes when the turn ends.
+    chats.setProject('sw', store.projects().find((p) => p.path === folder)!.id);
+    old.finish();
+    // The answer comes in before the old session's drop got its turn.
+    await chats.send('sw', 'private', 'sonnet', 'medium');
+    const now = FakeSession.all.get('sw')!;
+    expect(now).not.toBe(old);
+    expect(String(now.sent[0]!.content)).toContain('private');
+    expect(old.sent).toHaveLength(1);
+    now.finish();
+    rmSync(folder, { recursive: true, force: true });
+  });
+});
+
+describe('rewind and plan mode (docs/PLAN.md §6s C2, C3)', () => {
+  it('puts files and the conversation back to before a message, drops it and what came after', async () => {
+    const { chats, store, sent } = setup();
+    await chats.send('rw', 'first', 'sonnet', 'medium');
+    store.setSession('rw', 'session-rw');
+    FakeSession.all.get('rw')!.reply('one');
+    FakeSession.all.get('rw')!.finish();
+    await chats.send('rw', 'second', 'sonnet', 'medium');
+    FakeSession.all.get('rw')!.reply('two');
+    FakeSession.all.get('rw')!.finish();
+    await settle();
+
+    await chats.rewind('rw', 0);
+    const old = FakeSession.all.get('rw')!;
+    expect(old.rewound).toEqual(['rw-msg-2']);
+    const rewound = sent.find((m) => m.type === 'chat.rewound');
+    expect(rewound?.type === 'chat.rewound' && rewound.text).toBe('second');
+    expect(store.snapshot('rw')!.lines.map((l) => l.text)).toEqual([
+      'first',
+      'one',
+      expect.stringMatching(/^Rewound to before “second”\. Put back/),
+    ]);
+
+    // The next message resumes the conversation cut back to before "second".
+    await chats.send('rw', 'second, better', 'sonnet', 'medium');
+    const next = FakeSession.all.get('rw')!;
+    expect(next).not.toBe(old);
+    expect(next.start).toMatchObject({ resume: 'session-rw', resumeAt: 'rw-msg-1-reply' });
+  });
+
+  it("rewinding to the session's first message starts a new session", async () => {
+    const { chats, store } = setup();
+    await chats.send('rw1', 'only', 'sonnet', 'medium');
+    store.setSession('rw1', 'session-1');
+    FakeSession.all.get('rw1')!.finish();
+    await settle();
+    await chats.rewind('rw1', 0);
+    expect(store.getSession('rw1')).toBeNull();
+    expect(store.snapshot('rw1')!.lines.filter((l) => l.kind === 'you')).toHaveLength(0);
+  });
+
+  it('waits for the reply to end', async () => {
+    const { chats, store } = setup();
+    await chats.send('rw2', 'busy one', 'sonnet', 'medium');
+    await chats.rewind('rw2', 0);
+    expect(store.snapshot('rw2')!.lines.some((l) => l.text === 'busy one')).toBe(true);
+    FakeSession.all.get('rw2')!.finish();
+  });
+
+  it('switches plan mode on the session and tells the chat', async () => {
+    const { chats, sent } = setup();
+    await chats.send('pl', 'plan this', 'sonnet', 'medium');
+    chats.setPlanning('pl', true);
+    chats.planningChanged('pl', true);
+    await settle();
+    expect(FakeSession.all.get('pl')!.planning).toContain(true);
+    expect(sent.some((m) => m.type === 'chat.plan' && m.on)).toBe(true);
+    expect(chats.openChats().find((c) => c.id === 'pl')?.planning).toBe(true);
+  });
+});
+
+describe('scheduled tasks (docs/PLAN.md §6s C4)', () => {
+  it('runs in the chat that made it, reopened if it was closed, on AUTO', async () => {
+    const { chats, store, sent } = setup();
+    await chats.send('sch', 'remind me later', 'sonnet', 'medium');
+    FakeSession.all.get('sch')!.finish();
+    await settle();
+    chats.close('sch');
+    await chats.runScheduled({ tabId: 'sch', title: 'Morning news', prompt: 'Tell me the news' }, true);
+    expect(sent.some((m) => m.type === 'chat.opened' && m.chat.id === 'sch' && m.focus === false)).toBe(true);
+    const last = store
+      .snapshot('sch')!
+      .lines.filter((l) => l.kind === 'you')
+      .at(-1)!;
+    expect(last.text).toBe('[Scheduled task "Morning news", late: it was due while Harv was off] Tell me the news');
+  });
+
+  it('makes a new chat when the old one is gone, and every window shows it', async () => {
+    const { chats, store, sent } = setup();
+    await chats.runScheduled({ tabId: 'gone', title: 'Check build', prompt: 'Is it green?' }, false);
+    expect(store.title('gone')).toBe('Check build');
+    expect(store.openChats().some((c) => c.id === 'gone')).toBe(true);
+    // A new chat starts open in the store: the dashboards must still be told (the phone chat wasn't, 2026-10-29).
+    expect(sent.some((m) => m.type === 'chat.opened' && m.chat.id === 'gone')).toBe(true);
+  });
+});
+
+describe('a chat opened from outside (a scheduled task)', () => {
+  it('opens in every window once', () => {
+    const { chats, sent } = setup();
+    chats.ensureOpen('phone-x', 'Phone');
+    expect(sent.filter((m) => m.type === 'chat.opened' && m.chat.id === 'phone-x')).toHaveLength(1);
+    // Already open: no second tab.
+    chats.ensureOpen('phone-x', 'Phone');
+    expect(sent.filter((m) => m.type === 'chat.opened' && m.chat.id === 'phone-x')).toHaveLength(1);
+  });
+});
+
+describe('test pass fixes (2026-10-29)', () => {
+  it('a dead Claude session is dropped, so the next message starts a new one instead of hanging', async () => {
+    const { chats } = setup();
+    await chats.send('dead', 'hello', 'sonnet', 'medium');
+    const first = FakeSession.all.get('dead')!;
+    first.die();
+    await chats.send('dead', 'still there?', 'sonnet', 'medium');
+    const second = FakeSession.all.get('dead')!;
+    expect(second).not.toBe(first);
+    expect(second.sent.at(-1)!.content).toBe('still there?');
+  });
+
+  it('Stop while AUTO is still picking the model drops the turn', async () => {
+    let pick!: (v: null) => void;
+    const { chats, sent } = setup(() => new Promise<null>((r) => (pick = r)));
+    const sending = chats.send('stopr', 'write me a long essay', 'auto', 'medium');
+    await settle();
+    await chats.stop('stopr');
+    pick(null);
+    await sending;
+    expect(FakeSession.all.get('stopr')?.sent ?? []).toHaveLength(0);
+    expect(sent.some((m) => m.type === 'chat.done' && m.tabId === 'stopr' && m.stopped)).toBe(true);
+  });
+
+  it('rewinding past a message queued for the limit reset takes it out of the queue', async () => {
+    const { chats, meter, store } = setup();
+    await chats.send('rq', 'first', 'sonnet', 'medium');
+    store.setSession('rq', 'session-rq');
+    FakeSession.all.get('rq')!.reply('one');
+    FakeSession.all.get('rq')!.finish();
+    await settle();
+    meter.pause(Date.now() + 60_000);
+    await chats.send('rq', 'queued one', 'sonnet', 'medium');
+    expect(meter.snapshot().queued).toBe(1);
+    await chats.rewind('rq', 0);
+    expect(meter.snapshot().queued).toBe(0);
+  });
+});
+
+describe('AUTO steps up a struggling reply (2026-10-29)', () => {
+  it('moves an AUTO reply one step up, twice at most, and tags the rest of it', async () => {
+    const { chats, store, sent } = setup();
+    await chats.send('up', 'run my project tests and fix whatever fails', 'auto', 'medium');
+    const s = FakeSession.all.get('up')!;
+    const first = s.sent.at(-1)!;
+    s.hooks.onStruggle!('the tests failed');
+    await settle();
+    expect(s.retuned).toHaveLength(1);
+    const stepped = sent.filter((m) => m.type === 'chat.stepped');
+    expect(stepped).toHaveLength(1);
+    expect(stepped[0]!.type === 'chat.stepped' && stepped[0]!.reason).toMatch(/^↑ stepped up from .+: the tests failed$/);
+    s.hooks.onStruggle!('2 tool calls failed in a row');
+    s.hooks.onStruggle!('the tests failed');
+    await settle();
+    expect(s.retuned).toHaveLength(2);
+    // The reply's line carries the new tag and the reason.
+    s.reply('fixed');
+    s.finish();
+    const line = store.snapshot('up')!.lines.findLast((l) => l.kind === 'harv')!;
+    expect(line.tag).toBe(`${s.retuned[1]!.model}·${s.retuned[1]!.effort}`);
+    expect(line.reason).toMatch(/^↑/);
+    // Each step moves off where the reply started.
+    expect(s.retuned[0]).not.toEqual({ model: first.model, effort: first.effort });
+  });
+
+  it("never changes the user's own pick or an /opus-style override", async () => {
+    const { chats } = setup();
+    await chats.send('man', 'run the tests', 'sonnet', 'medium');
+    FakeSession.all.get('man')!.hooks.onStruggle!('the tests failed');
+    await chats.send('ovr', '/haiku run the tests', 'auto', 'medium');
+    FakeSession.all.get('ovr')!.hooks.onStruggle!('the tests failed');
+    await settle();
+    expect(FakeSession.all.get('man')!.retuned).toEqual([]);
+    expect(FakeSession.all.get('ovr')!.retuned).toEqual([]);
+  });
+
+  it('does nothing once the reply has finished', async () => {
+    const { chats } = setup();
+    await chats.send('done', 'run my project tests and fix whatever fails', 'auto', 'medium');
+    const s = FakeSession.all.get('done')!;
+    s.finish();
+    s.hooks.onStruggle!('the tests failed');
+    await settle();
+    expect(s.retuned).toEqual([]);
+  });
+});
+
+describe('queued messages go in mid-reply, like Claude Code (docs/PLAN.md §6ac)', () => {
+  const queued = (sent: ChatServerMessage[], tabId: string) =>
+    sent.flatMap((m) => (m.type === 'chat.queued' && m.tabId === tabId ? [m.items] : [])).at(-1) ?? [];
+  const youLines = (sent: ChatServerMessage[], tabId: string) =>
+    sent.flatMap((m) => (m.type === 'chat.line' && m.tabId === tabId && m.line.kind === 'you' ? [m.line.text] : []));
+
+  it('waits for the next tool step, then hands the message over; it shows when Claude takes it', async () => {
+    const { chats, sent } = setup();
+    await chats.send('q1', 'start the job', 'sonnet', 'medium');
+    const session = FakeSession.all.get('q1')!;
+    await chats.send('q1', 'also check the logs', 'sonnet', 'medium');
+    // No tool running yet: it waits in Harv's queue (still editable).
+    expect(session.folds).toHaveLength(0);
+    expect(queued(sent, 'q1')).toMatchObject([{ text: 'also check the logs' }]);
+    expect(queued(sent, 'q1')[0]!.handed).toBeUndefined();
+
+    session.tool();
+    expect(session.folds).toMatchObject([{ content: 'also check the logs' }]);
+    expect(queued(sent, 'q1')[0]!.handed).toBe(true);
+    // Handed over: it can't be removed or sent now any more.
+    chats.unqueue('q1', queued(sent, 'q1')[0]!.id);
+    await chats.sendNow('q1', queued(sent, 'q1')[0]!.id);
+    expect(queued(sent, 'q1')).toHaveLength(1);
+    expect(session.busy).toBe(true);
+
+    session.take(session.folds[0]!.id);
+    expect(queued(sent, 'q1')).toEqual([]);
+    // The typed message's line comes from the dashboard; the taken one is sent to every window.
+    expect(youLines(sent, 'q1')).toEqual(['also check the logs']);
+    session.finish();
+    await settle();
+    // It ran inside the reply: nothing is sent again after it.
+    expect(session.sent).toHaveLength(1);
+  });
+
+  // The full review, S18: a "bye" folded into the running reply lost its note, which then stuck to the next message.
+  it('keeps a "bye" typed mid-reply for its own turn, with the wrap-up note, and nothing after it', async () => {
+    const { chats } = setup();
+    await chats.send('q9', 'build it', 'sonnet', 'medium');
+    const session = FakeSession.all.get('q9')!;
+    session.tool();
+    await chats.send('q9', 'bye', 'sonnet', 'medium');
+    expect(session.folds).toHaveLength(0);
+    session.finish();
+    await settle();
+    expect(String(session.sent.at(-1)!.content)).toMatch(/learn-from-session[\s\S]*\nbye$/);
+    session.finish();
+    await chats.send('q9', 'one more thing', 'sonnet', 'medium');
+    await settle();
+    expect(String(session.sent.at(-1)!.content)).not.toMatch(/learn-from-session/);
+  });
+
+  // 2026-11-17: the user mostly adds to the running task by voice; it should feel like talking to Jarvis.
+  it('hands words spoken mid-reply into the running reply, with a note to say "got it" and end with a spoken line', async () => {
+    const { chats } = setup();
+    await chats.send('v1', 'make the header bigger', 'sonnet', 'medium');
+    const session = FakeSession.all.get('v1')!;
+    session.tool();
+    await chats.send('v1', 'and make it blue', 'sonnet', 'medium', [], true);
+    expect(session.folds).toHaveLength(1);
+    expect(String(session.folds[0]!.content)).toBe(SPOKEN_ADDITION + 'and make it blue');
+    expect(session.folds[0]!.content).toMatch(/Got it[\s\S]*hand_off \(wait: false\)[\s\S]*read aloud/);
+  });
+
+  it('"start a new chat and …" opens a new tab with the whole sentence; the busy chat keeps working', async () => {
+    const { chats, sent } = setup();
+    await chats.send('v2', 'refactor the explorer', 'sonnet', 'medium');
+    const main = FakeSession.all.get('v2')!;
+    main.tool();
+    await chats.send('v2', 'Harv, start a new chat and check the weather in Bratislava', 'auto', 'medium', [], true);
+    await settle();
+    // Nothing went into the running reply, and nothing waits in its queue.
+    expect(main.folds).toHaveLength(0);
+    expect(queued(sent, 'v2')).toEqual([]);
+    expect(main.busy).toBe(true);
+    const opened = sent.find((m) => m.type === 'chat.opened' && m.movedFrom === 'v2');
+    expect(opened).toBeDefined();
+    const to = opened!.type === 'chat.opened' ? opened!.chat.id : '';
+    expect(opened!.type === 'chat.opened' && opened!.focus).toBe(false);
+    const fresh = FakeSession.all.get(to)!;
+    const first = String(fresh.sent[0]!.content);
+    expect(first).toMatch(/this is it[\s\S]*Harv, start a new chat and check the weather in Bratislava$/);
+    // Said by voice: the new chat answers to be read aloud.
+    expect(first).toMatch(/talking to you by voice/);
+    expect(youLines(sent, to)).toEqual(['Harv, start a new chat and check the weather in Bratislava']);
+    expect(
+      sent.some(
+        (m) =>
+          m.type === 'chat.line' && m.tabId === 'v2' && m.line.kind === 'notice' && /new chat for “Check the weather/.test(m.line.text),
+      ),
+    ).toBe(true);
+  });
+
+  it('"start a new chat" alone opens an empty one; in a chat with nothing in it yet, the task just runs there', async () => {
+    const { chats, sent } = setup();
+    await chats.send('v3', 'hello', 'sonnet', 'medium');
+    FakeSession.all.get('v3')!.finish();
+    await settle();
+    await chats.send('v3', 'open a new chat', 'sonnet', 'medium');
+    const opened = sent.filter((m) => m.type === 'chat.opened' && m.movedFrom === 'v3');
+    expect(opened).toHaveLength(1);
+    expect(FakeSession.all.get(opened[0]!.type === 'chat.opened' ? opened[0]!.chat.id : '')).toBeUndefined();
+
+    await chats.send('v4', 'start a new chat and plan my week', 'sonnet', 'medium');
+    expect(sent.some((m) => m.type === 'chat.opened' && m.movedFrom === 'v4')).toBe(false);
+    expect(FakeSession.all.get('v4')!.sent).toHaveLength(1);
+  });
+
+  it('hands a message typed while a tool runs over at once', async () => {
+    const { chats } = setup();
+    await chats.send('q2', 'build it', 'sonnet', 'medium');
+    const session = FakeSession.all.get('q2')!;
+    session.tool();
+    await chats.send('q2', 'use the dev branch', 'sonnet', 'medium');
+    expect(session.folds).toMatchObject([{ content: 'use the dev branch' }]);
+  });
+
+  it('keeps a command, and everything after it, for after the reply', async () => {
+    const { chats, sent } = setup();
+    await chats.send('q3', 'look around', 'sonnet', 'medium');
+    const session = FakeSession.all.get('q3')!;
+    await chats.send('q3', 'first note', 'sonnet', 'medium');
+    await chats.send('q3', '/haiku quick one', 'sonnet', 'medium');
+    await chats.send('q3', 'after the command', 'sonnet', 'medium');
+    session.tool();
+    expect(session.folds.map((f) => f.content)).toEqual(['first note']);
+    session.take(session.folds[0]!.id);
+    session.finish();
+    await settle();
+    expect(session.sent.at(-1)!.content).toBe('quick one');
+    expect(queued(sent, 'q3')).toMatchObject([{ text: 'after the command' }]);
+  });
+
+  it('a message the reply ended before taking runs as its own turn (never sent twice)', async () => {
+    const { chats, sent } = setup();
+    await chats.send('q4', 'one step', 'sonnet', 'medium');
+    const session = FakeSession.all.get('q4')!;
+    session.tool();
+    await chats.send('q4', 'then this', 'sonnet', 'medium');
+    session.finish();
+    await settle();
+    expect(session.sent).toHaveLength(1);
+    session.take(session.folds[0]!.id, true);
+    expect(youLines(sent, 'q4')).toEqual(['then this']);
+    expect(sent.some((m) => m.type === 'chat.started' && m.tabId === 'q4' && /queued message/.test(m.reason ?? ''))).toBe(true);
+    expect(queued(sent, 'q4')).toEqual([]);
+  });
+
+  it('a session that dies with handed messages gives them back to the queue', async () => {
+    const { chats, sent } = setup();
+    await chats.send('q5', 'go', 'sonnet', 'medium');
+    const session = FakeSession.all.get('q5')!;
+    session.tool();
+    await chats.send('q5', 'and this', 'sonnet', 'medium');
+    session.die();
+    await settle();
+    await settle();
+    // It runs in the next session like any queued message.
+    const next = FakeSession.all.get('q5')!;
+    expect(next).not.toBe(session);
+    expect(next.sent.at(-1)!.content).toBe('and this');
+    expect(queued(sent, 'q5')).toEqual([]);
+  });
+
+  it('hands nothing over while a plan limit pauses Harv, or when the CLI does not report taking messages', async () => {
+    const { chats, meter } = setup();
+    await chats.send('q6', 'go', 'sonnet', 'medium');
+    const session = FakeSession.all.get('q6')!;
+    await chats.send('q6', 'later', 'sonnet', 'medium');
+    meter.pause(Date.now() + 60_000);
+    session.tool();
+    expect(session.folds).toHaveLength(0);
+    (meter as unknown as { pausedUntil: number | null }).pausedUntil = null;
+    session.lifecycle = false;
+    session.tool();
+    expect(session.folds).toHaveLength(0);
+  });
+});

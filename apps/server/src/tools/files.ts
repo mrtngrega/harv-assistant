@@ -1,0 +1,225 @@
+import { spawn } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { HARV_HOME } from '../paths.ts';
+import { IS_WINDOWS, osPath } from '../platform.ts';
+import { isSensitivePath } from '../safety/classify.ts';
+import type { FileEntry, FilePlaces, FolderListing, PathSuggestion } from '@harv/shared';
+
+// The file explorer tab. These are the user's own clicks in their own dashboard
+// (the server refuses other origins), so they don't pass Harv's safety gate.
+// Harv itself reads files through its Read tool and changes them through the gate.
+
+/** Names Windows hides that would only clutter the list. */
+const SYSTEM_NAMES = new Set([
+  '$recycle.bin',
+  'system volume information',
+  'desktop.ini',
+  'thumbs.db',
+  'pagefile.sys',
+  'hiberfil.sys',
+  'swapfile.sys',
+  'dumpstack.log.tmp',
+]);
+
+/** A clean absolute path of this OS (C:\… on Windows, /… on Linux), or null for anything else. */
+export function cleanPath(p: unknown): string | null {
+  if (typeof p !== 'string' || !p.trim()) return null;
+  if (!IS_WINDOWS) {
+    const normal = osPath.normalize(p.trim());
+    return osPath.isAbsolute(normal) && !normal.includes('\0') ? normal.replace(/(.)\/+$/, '$1') : null;
+  }
+  const normal = osPath.normalize(p.trim().replace(/\//g, '\\'));
+  if (!osPath.isAbsolute(normal) || !/^[a-z]:\\/i.test(normal)) return null;
+  return normal;
+}
+
+/**
+ * A file in the other computer's Harv workspace (a picture path in a synced chat, Windows or Linux style):
+ * this computer's synced copy of it, or null. The workspace syncs, but a reply keeps the path it was
+ * written with, so the notebook's previews of a PC chat came up empty (2026-11-15).
+ */
+export function syncedTwin(p: unknown, workspace = osPath.join(HARV_HOME, 'workspace')): string | null {
+  if (typeof p !== 'string') return null;
+  const m = /[\\/]\.harv[\\/]workspace[\\/](.+)$/.exec(p.trim());
+  if (!m) return null;
+  const parts = (m[1] ?? '').split(/[\\/]+/).filter(Boolean);
+  if (!parts.length || parts.some((s) => s === '..' || s === '.' || s.includes('\0'))) return null;
+  return osPath.join(workspace, ...parts);
+}
+
+/** Linux: the user's data folder (XDG_DATA_HOME, else ~/.local/share), where the Trash and KDE's places live. */
+export const dataHome = (home = homedir()) => process.env.XDG_DATA_HOME || osPath.join(home, '.local', 'share');
+
+/** Windows: the drive roots that exist, C:\ to Z:\. */
+export function driveLetters(): string[] {
+  const roots: string[] = [];
+  for (let c = 67; c <= 90; c++) {
+    const root = `${String.fromCharCode(c)}:\\`;
+    if (existsSync(root)) roots.push(root);
+  }
+  return roots;
+}
+
+/**
+ * Linux: the places in Dolphin's sidebar (KDE keeps them in user-places.xbel), in the user's order,
+ * so Harv's explorer shows the same list. Only local folders that exist, plus the Trash; null when
+ * there's no such file (another desktop), so the usual list is used.
+ */
+export function kdePlaces(xml: string, home: string): Pick<FilePlaces, 'places' | 'trash'> | null {
+  const out: FilePlaces['places'] = [];
+  let trash: string | undefined;
+  for (const m of xml.matchAll(/<bookmark\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/bookmark>/g)) {
+    const [, href = '', body = ''] = m;
+    if (/<IsHidden>true<\/IsHidden>/.test(body)) continue;
+    const title = /<title>([^<]*)<\/title>/
+      .exec(body)?.[1]
+      ?.trim()
+      .replace(/&(amp|lt|gt|quot|apos);/g, (_, e: string) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" })[e]!);
+    if (href === 'trash:/') {
+      trash = osPath.join(dataHome(home), 'Trash', 'files');
+      continue;
+    }
+    if (!href.startsWith('file://')) continue;
+    let path: string;
+    try {
+      path = decodeURIComponent(href.slice('file://'.length));
+    } catch {
+      continue;
+    }
+    if (!existsSync(path) || out.some((p) => p.path === path)) continue;
+    out.push({ name: path === home ? 'Home' : title || osPath.basename(path), path });
+  }
+  if (!out.length) return null;
+  // Home first: the explorer's Home button and breadcrumb start from it.
+  const homeAt = out.findIndex((p) => p.path === home);
+  if (homeAt > 0) out.unshift(...out.splice(homeAt, 1));
+  else if (homeAt < 0) out.unshift({ name: 'Home', path: home });
+  return { places: out, ...(trash ? { trash } : {}) };
+}
+
+export function places(): FilePlaces {
+  const home = homedir();
+  if (!IS_WINDOWS) {
+    try {
+      const xbel = osPath.join(dataHome(home), 'user-places.xbel');
+      const kde = existsSync(xbel) ? kdePlaces(readFileSync(xbel, 'utf8'), home) : null;
+      if (kde) return { ...kde, drives: ['/'] };
+    } catch {
+      // The usual list below.
+    }
+  }
+  const named = ['Desktop', 'Documents', 'Downloads', 'Pictures', 'Music', 'Videos'].map((name) => ({
+    name,
+    path: osPath.join(home, name),
+  }));
+  const drives = IS_WINDOWS ? driveLetters() : ['/'];
+  return { places: [{ name: 'Home', path: home }, ...named.filter((p) => existsSync(p.path))], drives };
+}
+
+export function listFolder(path: string): FolderListing {
+  const entries: FileEntry[] = [];
+  for (const dirent of readdirSync(path, { withFileTypes: true })) {
+    const full = osPath.join(path, dirent.name);
+    let dir = dirent.isDirectory();
+    let size: number | undefined;
+    let mtime: number | undefined;
+    try {
+      const st = statSync(full);
+      dir = st.isDirectory();
+      size = dir ? undefined : st.size;
+      mtime = st.mtimeMs;
+    } catch {
+      // Locked or no permission: list it without details.
+    }
+    const lower = dirent.name.toLowerCase();
+    entries.push({ name: dirent.name, path: full, dir, size, mtime, hidden: dirent.name.startsWith('.') || SYSTEM_NAMES.has(lower) });
+  }
+  // Folders first, then by name like Explorer.
+  entries.sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+  const parent = osPath.dirname(path);
+  return { path, parent: parent === path ? null : parent, entries };
+}
+
+/**
+ * Suggestions for `@` in the command line (like Claude Code's): what's typed is a path, absolute
+ * (`C:\Us`, `/home/…`, `~/Doc`) or a name in the home folder (`Doc`); the folder it's in is listed,
+ * names that start with the last part first, then names that contain it. Empty: Home, its folders, drives.
+ */
+export function suggestPaths(query: string, limit = 30): PathSuggestion[] {
+  const home = homedir();
+  const q = query.trim().replace(/^["']/, '');
+  if (!q) {
+    const { places: named, drives } = places();
+    return [...named.map((p) => p.path), ...drives].map((path) => ({ path, name: path, folder: true, size: 0 }));
+  }
+  let typed = q.startsWith('~') ? home + q.slice(1) : q;
+  if (IS_WINDOWS && /^[a-z]:$/i.test(typed)) typed += '\\';
+  const clean = cleanPath(typed);
+  const endsWithSep = /[\\/]$/.test(typed);
+  const dir = !clean ? home : endsWithSep ? clean : osPath.dirname(clean);
+  const part = (!clean ? typed : endsWithSep ? '' : osPath.basename(clean)).toLowerCase();
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const visible = names.filter((n) => !SYSTEM_NAMES.has(n.toLowerCase()) && (!n.startsWith('.') || part.startsWith('.')));
+  const lower = (n: string) => n.toLowerCase();
+  const picked = [
+    ...visible.filter((n) => lower(n).startsWith(part)),
+    ...visible.filter((n) => part !== '' && !lower(n).startsWith(part) && lower(n).includes(part)),
+  ];
+  const out: PathSuggestion[] = [];
+  for (const name of picked) {
+    const path = osPath.join(dir, name);
+    // Keys and logins aren't offered to attach (Harv couldn't read them anyway).
+    if (isSensitivePath(path)) continue;
+    const st = statSync(path, { throwIfNoEntry: false });
+    if (!st) continue;
+    out.push({ path, name, folder: st.isDirectory(), size: st.isDirectory() ? 0 : st.size });
+    if (out.length >= limit) break;
+  }
+  // Folders first (they're what you walk into), keeping the order above within each kind.
+  return [...out.filter((s) => s.folder), ...out.filter((s) => !s.folder)];
+}
+
+/** Opens a file with its default app, or a folder in Windows Explorer (the desktop's file manager on Linux). */
+export function openWithDefault(path: string, reveal = false): void {
+  if (!IS_WINDOWS) {
+    spawn('xdg-open', [reveal ? osPath.dirname(path) : path], { detached: true, stdio: 'ignore' })
+      .on('error', () => {})
+      .unref();
+    return;
+  }
+  const args = reveal ? [`/select,${path}`] : [path];
+  spawn('explorer.exe', args, { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+}
+
+const MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.pdf': 'application/pdf',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+};
+
+/** What the preview should treat the file as. SVG is sent as text, never rendered, since it can carry scripts. */
+export function previewType(path: string): { kind: 'image' | 'pdf' | 'media' | 'text' | 'none'; mime: string } {
+  const ext = osPath.extname(path).toLowerCase();
+  const mime = MIME[ext];
+  if (ext === '.svg') return { kind: 'text', mime: 'text/plain; charset=utf-8' };
+  if (mime?.startsWith('image/')) return { kind: 'image', mime };
+  if (mime === 'application/pdf') return { kind: 'pdf', mime };
+  if (mime) return { kind: 'media', mime };
+  return { kind: 'text', mime: 'text/plain; charset=utf-8' };
+}

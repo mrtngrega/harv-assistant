@@ -1,0 +1,953 @@
+<title>Harv Presence</title>
+<meta name="claude:viewport-fit-sides" content="cover" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" />
+<style>
+  /* Layout: two stages, Harv's chat (the drop hangs from the chat's top edge) and the desktop (the pill at the screen's top). */
+  :root {
+    --glass: rgba(16, 24, 34, 0.55);
+    --line: rgba(220, 232, 245, 0.14);
+    --ink: #dce8f5;
+    --muted: #8fa3b8;
+    --faint: #5d6f82;
+    --accent: #a8c8e8;
+    --warn: #f2b880;
+    --ok: #9fd8b4;
+    --mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    color-scheme: dark;
+  }
+  html,
+  body {
+    min-height: 100%;
+  }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 30% 10%, rgba(120, 150, 175, 0.35), transparent 60%),
+      radial-gradient(900px 500px at 80% 90%, rgba(40, 60, 80, 0.6), transparent 60%),
+      linear-gradient(180deg, #4a5a68 0%, #26323e 45%, #121a22 100%);
+    background-attachment: fixed;
+    color: var(--ink);
+    font: 13px/1.5 var(--mono);
+  }
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding-block: 20px 28px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+  }
+  h2 {
+    margin: 6px 0 0;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    color: var(--faint);
+  }
+  .lede {
+    margin: 0;
+    color: var(--muted);
+    max-width: 80ch;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 22px;
+    align-items: center;
+  }
+  .group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+  .group > span {
+    color: var(--faint);
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    margin-right: 4px;
+  }
+  button.chip {
+    font: 12px var(--mono);
+    color: var(--muted);
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+  button.chip:hover {
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.06);
+  }
+  button.chip[aria-pressed='true'] {
+    color: #0f1620;
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  button.chip.warn[aria-pressed='true'] {
+    background: var(--warn);
+    border-color: var(--warn);
+  }
+  button.go {
+    color: #0f1620;
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .panel {
+    position: relative;
+    border-radius: 18px;
+    background: var(--glass);
+    border: 1px solid var(--line);
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
+    overflow: hidden;
+    min-width: 0;
+  }
+  .bar {
+    display: flex;
+    align-items: flex-end;
+    gap: 4px;
+    padding: 8px 10px 0;
+    border-bottom: 1px solid var(--line);
+    overflow: hidden;
+  }
+  .tab {
+    font-size: 12px;
+    color: var(--muted);
+    padding: 8px 14px;
+    border-radius: 10px 10px 0 0;
+    white-space: nowrap;
+  }
+  .tab.on {
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(220, 232, 245, 0.18);
+    border-bottom: 0;
+  }
+  .stage {
+    position: relative;
+    height: clamp(380px, 46vw, 470px);
+  }
+  canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+  .log {
+    position: absolute;
+    left: 22px;
+    right: 22px;
+    bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    color: var(--muted);
+  }
+  .log .you {
+    color: var(--ink);
+    background: rgba(168, 200, 232, 0.1);
+    border-left: 2px solid var(--accent);
+    padding: 6px 10px;
+    border-radius: 6px;
+  }
+  .log .you b {
+    color: var(--accent);
+    font-weight: 400;
+  }
+  .log .harv b {
+    color: var(--ok);
+    font-weight: 400;
+  }
+  .log .step {
+    color: var(--faint);
+  }
+  .status {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    border-top: 1px solid var(--line);
+    padding: 8px 22px;
+    font-size: 12px;
+    min-width: 0;
+  }
+  .status .dot {
+    width: 12px;
+    text-align: center;
+  }
+  .status .extra {
+    color: var(--faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .prompt {
+    padding: 6px 22px 14px;
+    color: var(--faint);
+  }
+  .prompt b {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  .desk {
+    position: relative;
+    height: 230px;
+    border-radius: 14px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    background:
+      radial-gradient(500px 200px at 70% 80%, rgba(70, 110, 90, 0.35), transparent 70%),
+      linear-gradient(160deg, #2d3b47 0%, #1b252e 60%, #121920 100%);
+  }
+  .desk .win {
+    position: absolute;
+    left: 8%;
+    top: 70px;
+    width: 46%;
+    height: 120px;
+    border-radius: 8px;
+    background: rgba(230, 236, 242, 0.08);
+    border: 1px solid var(--line);
+    color: var(--faint);
+    font-size: 11px;
+    padding: 10px 12px;
+    box-sizing: border-box;
+  }
+  .desk .win.two {
+    left: 58%;
+    top: 96px;
+    width: 30%;
+    height: 90px;
+  }
+  .desk .taskbar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 26px;
+    background: rgba(10, 14, 20, 0.6);
+  }
+
+  .notes {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 12px;
+  }
+  .note {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 14px;
+    background: rgba(0, 0, 0, 0.18);
+    min-width: 0;
+  }
+  .note h3 {
+    margin: 0 0 6px;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .note p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  @media (max-width: 560px) {
+    .log .harv,
+    .log .step {
+      display: none;
+    }
+  }
+</style>
+
+<div class="wrap">
+  <h1>[HARV] PRESENCE · v2</h1>
+  <p class="lede">
+    Harv drops into view only while he works. His face sits in the middle, and his eyes follow the moon he's working with: files, memory,
+    shell, web, helpers or the desktop. At rest only a faint glint on the bar's edge shows where he'll drop from. Bring the mouse near and
+    he pulls back up. On the desktop the same Harv lives in a pill at the top of the screen.
+  </p>
+
+  <div class="controls">
+    <div class="group" role="group" aria-label="Status">
+      <span>STATUS</span>
+      <button class="chip" data-status="idle" aria-pressed="true">idle</button>
+      <button class="chip" data-status="thinking" aria-pressed="false">thinking</button>
+      <button class="chip" data-status="working" aria-pressed="false">working</button>
+      <button class="chip warn" data-status="waiting" aria-pressed="false">waiting for yes</button>
+      <button class="chip" data-status="desktop" aria-pressed="false">on your desktop</button>
+      <button class="chip" data-status="paused" aria-pressed="false">plan limit</button>
+      <button class="chip" data-status="error" aria-pressed="false">error</button>
+    </div>
+    <button class="chip go" id="play">▶ play a reply</button>
+  </div>
+
+  <h2>IN THE CHAT</h2>
+  <div class="panel" id="panel">
+    <div class="bar" aria-hidden="true">
+      <div class="tab">Spustenie ShopNotes</div>
+      <div class="tab">Instagram skills</div>
+      <div class="tab on">Presence test</div>
+    </div>
+    <div class="stage" id="stage">
+      <canvas id="c" role="img" aria-label="Harv's presence in the chat"></canvas>
+      <div class="log" aria-hidden="true">
+        <div class="you"><b>you ›</b> clean up the stats panel and run the tests</div>
+        <div class="harv"><b>harv ›</b> On it: I'll fold the hardware cards first, then run the web tests.</div>
+        <div class="step" id="lastStep">▸ 3 steps · 12s</div>
+      </div>
+    </div>
+    <div class="status"><span class="dot" id="sDot">●</span><span id="sLabel">idle</span><span class="extra" id="sExtra"></span></div>
+    <div class="prompt"><b>harv&gt;</b> ask anything · / for commands</div>
+  </div>
+
+  <h2>ON THE DESKTOP</h2>
+  <div class="desk" id="desk">
+    <div class="win">Spotify</div>
+    <div class="win two">Calculator</div>
+    <div class="taskbar"></div>
+    <canvas id="d" role="img" aria-label="Harv's pill on the desktop"></canvas>
+  </div>
+
+  <div class="notes">
+    <div class="note">
+      <h3>HIS EYES</h3>
+      <p>
+        They follow the moon he's working with as it moves along its orbit, so you can tell what he's doing without reading. They blink when
+        he's calm, scan while he thinks, turn amber and look down at your prompt when he needs a yes, become crosshairs on the desktop,
+        close at a plan limit, and flinch on an error.
+      </p>
+    </div>
+    <div class="note">
+      <h3>ONLY WHILE WORKING</h3>
+      <p>
+        At rest nothing hangs from the bar: only a faint glint on its edge. A turn starts and the drop falls into view in about half a
+        second. When he's done there's a short flash, then he pulls back up two seconds later.
+      </p>
+    </div>
+    <div class="note">
+      <h3>THE PILL</h3>
+      <p>
+        Outside the app he's a dot at the top of your screen; while he works it opens with his face, what he's doing and the six moons. It
+        is also the desktop-control pill: with his crosshair eyes, STOP and the glow round the monitor. Mouse near pulls it up, except while
+        he drives the desktop, so STOP stays reachable.
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+  (() => {
+    const C = { accent: '#a8c8e8', warn: '#f2b880', bad: '#f08a8a', grey: '#6b7a88', ink: '#dce8f5' };
+    const MOONS = [
+      { id: 'memory', label: 'memory', a: -2.6 },
+      { id: 'files', label: 'files', a: -1.6 },
+      { id: 'shell', label: 'shell', a: -0.55 },
+      { id: 'web', label: 'web', a: 0.55 },
+      { id: 'agents', label: 'helpers', a: 1.6 },
+      { id: 'desktop', label: 'desktop', a: 2.6 },
+    ];
+    const STATUS = {
+      idle: ['●', 'idle', '', C.accent],
+      thinking: ['✻', 'thinking…', '(4s · esc to stop)', C.accent],
+      working: ['✻', 'working · reading StatsDetails.tsx', '(12s · ↓ 340 tokens · esc to stop)', C.accent],
+      waiting: ['!', 'waiting for your yes · 1 held', 'reply yes or no', C.warn],
+      desktop: ['⌖', 'controlling your desktop · open Calculator', '(6s · esc to stop)', C.accent],
+      paused: ['●', 'paused · plan limit until 23:10', '2 waiting', C.warn],
+      error: ['!', 'the reply failed', 'Claude error: overloaded', C.bad],
+    };
+    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const ease = (from, to, rate, dt) => from + (to - from) * Math.min(1, dt * rate);
+    const rgba = (hex, a) => {
+      const n = parseInt(hex.slice(1), 16);
+      return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`;
+    };
+
+    const s = {
+      status: 'idle',
+      t: 0,
+      last: performance.now(),
+      ext: 0,
+      overChat: false,
+      overDesk: false,
+      chatShow: 1,
+      deskShow: 1,
+      pill: 0,
+      flash: 0,
+      shake: 0,
+      linger: 0,
+      blink: 0,
+      nextBlink: 2,
+      look: { x: 0, y: 0 },
+      lookAt: null,
+      pulses: [],
+      glow: {},
+      helpers: [],
+      label: 'idle',
+    };
+    for (const m of MOONS) s.glow[m.id] = 0;
+    const active = () => s.status !== 'idle' || s.linger > 0;
+    const tint = () => ({ waiting: C.warn, paused: C.grey, error: C.bad })[s.status] || C.accent;
+    const speed = () =>
+      ({ idle: 0.5, thinking: 1.6, working: 1.2, waiting: 0.2, desktop: 1, paused: 0.1, error: 0.4 })[s.status] * (reduced ? 0.3 : 1);
+
+    function setup(canvas) {
+      const ctx = canvas.getContext('2d');
+      const box = canvas.parentElement;
+      const o = { ctx, box, W: 0, H: 0 };
+      const fit = () => {
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        o.W = box.clientWidth;
+        o.H = box.clientHeight;
+        canvas.width = o.W * dpr;
+        canvas.height = o.H * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      };
+      new ResizeObserver(fit).observe(box);
+      fit();
+      return o;
+    }
+    const chat = setup(document.getElementById('c'));
+    const desk = setup(document.getElementById('d'));
+
+    // ---- Harv's face: a glass core with two eyes of light ----
+    function face(ctx, x, y, pr, alpha) {
+      const col = tint();
+      const shake = s.shake > 0 && !reduced ? Math.sin(s.t * 70) * s.shake * pr * 0.12 : 0;
+      x += shake;
+      ctx.save();
+      ctx.globalAlpha *= alpha;
+      const halo = ctx.createRadialGradient(x, y, pr * 0.7, x, y, pr * 2.3);
+      halo.addColorStop(0, rgba(col, 0.22 + s.flash * 0.5));
+      halo.addColorStop(1, rgba(col, 0));
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(x, y, pr * 2.3, 0, 6.29);
+      ctx.fill();
+      // The core: dark glass with a lit rim.
+      const body = ctx.createRadialGradient(x - pr * 0.35, y - pr * 0.4, pr * 0.1, x, y, pr);
+      body.addColorStop(0, '#2a3d50');
+      body.addColorStop(1, '#0c131b');
+      ctx.fillStyle = body;
+      ctx.beginPath();
+      ctx.arc(x, y, pr, 0, 6.29);
+      ctx.fill();
+      ctx.strokeStyle = rgba(col, 0.55 + s.flash * 0.45);
+      ctx.lineWidth = Math.max(1, pr * 0.06);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x, y, pr * 0.82, Math.PI * 1.15, Math.PI * 1.45);
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.lineWidth = Math.max(1, pr * 0.05);
+      ctx.stroke();
+
+      // Eyes: where they look and how open they are depends on the status.
+      let lx = s.look.x,
+        ly = s.look.y;
+      let open = 1 - s.blink;
+      let w = pr * 0.2,
+        h = pr * 0.42;
+      if (s.status === 'thinking') {
+        h *= 0.45;
+        lx = Math.sin(s.t * 2.4) * 0.9;
+        ly = -0.2;
+      }
+      if (s.status === 'waiting') {
+        ly = 1;
+        lx = 0;
+        h *= 1.08;
+      }
+      if (s.status === 'paused') {
+        open = 0.08;
+        ly = 0.4;
+      }
+      const ex = lx * pr * 0.36,
+        ey = ly * pr * 0.24;
+      const gap = pr * 0.27;
+      ctx.fillStyle = rgba(col, 1);
+      ctx.strokeStyle = rgba(col, 1);
+      ctx.shadowColor = rgba(col, 0.9);
+      ctx.shadowBlur = pr * 0.4;
+      for (const side of [-1, 1]) {
+        const cx = x + side * gap + ex,
+          cy = y + ey - pr * 0.04;
+        if (s.status === 'desktop') {
+          // Crosshair eyes: Harv has the mouse.
+          ctx.lineWidth = Math.max(1, pr * 0.06);
+          ctx.beginPath();
+          ctx.arc(cx, cy, w * 0.75, 0, 6.29);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(cx, cy, w * 0.18, 0, 6.29);
+          ctx.fill();
+        } else if (s.status === 'error' && s.shake > 0.3) {
+          ctx.lineWidth = Math.max(1.2, pr * 0.07);
+          const k = w * 0.7;
+          ctx.beginPath();
+          ctx.moveTo(cx - k, cy - k);
+          ctx.lineTo(cx + k, cy + k);
+          ctx.moveTo(cx + k, cy - k);
+          ctx.lineTo(cx - k, cy + k);
+          ctx.stroke();
+        } else {
+          const hh = Math.max(pr * 0.04, h * open);
+          ctx.beginPath();
+          ctx.roundRect(cx - w / 2, cy - hh / 2, w, hh, w / 2);
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+    }
+
+    // ---- Moons around the core (lot-map's stations) ----
+    // Orbits: evenly spaced, gently tilted, flattened for depth; inner moons run faster (like real ones).
+    const TILT = -0.16,
+      FLAT = 0.42;
+    function moonPos(m, x, y, R) {
+      const i = MOONS.indexOf(m);
+      const rad = R * (0.5 + i * 0.064);
+      // Each moon starts on its own side, so they never bunch up.
+      const a = m.a + s.t * (0.5 - i * 0.055) * speed();
+      const dx = Math.cos(a) * rad,
+        dy = Math.sin(a) * rad * FLAT;
+      const depth = (Math.sin(a) + 1) / 2;
+      return {
+        x: x + dx * Math.cos(TILT) - dy * Math.sin(TILT),
+        y: y + dx * Math.sin(TILT) + dy * Math.cos(TILT),
+        front: Math.sin(a) > 0,
+        rad,
+        depth,
+      };
+    }
+    function orbits(ctx, x, y, R, alpha) {
+      MOONS.forEach((m, i) => {
+        const rad = R * (0.5 + i * 0.064);
+        ctx.beginPath();
+        ctx.ellipse(x, y, rad, rad * FLAT, TILT, 0, 6.29);
+        ctx.strokeStyle = rgba(C.ink, (s.focus === m.id ? 0.2 : 0.07) * alpha);
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      });
+    }
+    function moons(ctx, x, y, R, alpha, front) {
+      const col = tint();
+      for (const m of MOONS) {
+        const p = moonPos(m, x, y, R);
+        if (p.front !== front) continue;
+        const g = s.glow[m.id];
+        // Nearer moons are a little bigger and brighter.
+        const a2 = alpha * (0.5 + p.depth * 0.5);
+        const size = 2.6 + p.depth * 1.6 + g * 2.5;
+        if (g > 0.02) {
+          const gl = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 4);
+          gl.addColorStop(0, rgba(col, 0.6 * g * alpha));
+          gl.addColorStop(1, rgba(col, 0));
+          ctx.fillStyle = gl;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, size * 4, 0, 6.29);
+          ctx.fill();
+        }
+        // A small lit sphere: light from the top left, like the core.
+        const sph = ctx.createRadialGradient(p.x - size * 0.35, p.y - size * 0.4, size * 0.1, p.x, p.y, size);
+        sph.addColorStop(0, rgba('#ffffff', (0.55 + g * 0.45) * a2));
+        sph.addColorStop(1, rgba(g > 0.05 ? '#ffffff' : col, (0.45 + g * 0.5) * a2));
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, size, 0, 6.29);
+        ctx.fillStyle = sph;
+        ctx.fill();
+        if (g > 0.25 || s.focus === m.id) {
+          ctx.font = '10px IBM Plex Mono, monospace';
+          ctx.fillStyle = rgba(C.ink, Math.max(g, s.focus === m.id ? 0.75 : 0) * alpha);
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillText(m.label, p.x, p.y + size + 3);
+        }
+        if (m.id === 'agents')
+          for (const h of s.helpers) {
+            const a = s.t * 3 + h;
+            ctx.beginPath();
+            ctx.arc(p.x + Math.cos(a) * 10, p.y + Math.sin(a) * 5.5, 1.8, 0, 6.29);
+            ctx.fillStyle = rgba(C.ink, 0.85 * alpha);
+            ctx.fill();
+          }
+      }
+    }
+    function pulses(ctx, x, y, R, alpha) {
+      for (const p of s.pulses) {
+        const m = MOONS.find((q) => q.id === p.to);
+        const end = moonPos(m, x, y, R);
+        const e = 1 - Math.pow(1 - Math.min(1, p.k), 3);
+        const px = x + (end.x - x) * e,
+          py = y + (end.y - y) * e - Math.sin(e * Math.PI) * 8;
+        const tail = ctx.createRadialGradient(px, py, 0, px, py, 9);
+        tail.addColorStop(0, rgba(tint(), 0.6 * alpha));
+        tail.addColorStop(1, rgba(tint(), 0));
+        ctx.fillStyle = tail;
+        ctx.beginPath();
+        ctx.arc(px, py, 9, 0, 6.29);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(px, py, 2.4, 0, 6.29);
+        ctx.fillStyle = rgba('#ffffff', 0.95 * alpha);
+        ctx.fill();
+      }
+    }
+
+    // ---- The chat: a glass drop from the top edge, a bead when idle ----
+    function drawChat() {
+      const { ctx, W, H } = chat;
+      ctx.clearRect(0, 0, W, H);
+      const show = s.chatShow;
+      if (show < 0.01) return;
+      const big = Math.max(56, Math.min(84, W * 0.07));
+      const e = s.ext;
+      const cx0 = W / 2;
+      // At rest: no bump, only a faint glint along the edge where he will drop from.
+      const rest = 1 - Math.min(1, e * 4);
+      if (rest > 0) {
+        const b = reduced ? 0.6 : 0.45 + Math.sin(s.t * 1.2) * 0.2;
+        const gl = ctx.createLinearGradient(cx0 - 70, 0, cx0 + 70, 0);
+        gl.addColorStop(0, rgba(tint(), 0));
+        gl.addColorStop(0.5, rgba(tint(), b * rest * show));
+        gl.addColorStop(1, rgba(tint(), 0));
+        ctx.fillStyle = gl;
+        ctx.fillRect(cx0 - 70, 0, 140, 1.5);
+      }
+      if (e < 0.03) return;
+      const R = big * e;
+      const wob = reduced ? 0 : (Math.sin(s.t * 1.7) * 1.6 + Math.sin(s.t * 0.9)) * e;
+      const cx = cx0;
+      // A hammock, not a bulb: one long slack curve leaves the bar far out, slopes down
+      // smoothly and turns through a wide, rounded bottom (the user's sketch, 2026-11-11).
+      // Two cubics meet at the bottom on a flat tangent, so there is no corner anywhere.
+      const D = R * 1.5 + wob; // how deep it hangs: just deep enough for the moons
+      const cy = D - R * 0.66; // the face sits in the bottom, with no empty band above it
+      const sway = reduced ? 0 : Math.sin(s.t * 1.1) * 0.03;
+      const half = Math.max(R * 3.6, W * 0.3 * e) * (1 + sway);
+      ctx.save();
+      ctx.globalAlpha = show;
+      ctx.translate(0, -(1 - show) * (D + 10));
+      const path = () => {
+        ctx.beginPath();
+        ctx.moveTo(cx - half, 0);
+        ctx.bezierCurveTo(cx - half * 0.58, 0, cx - half * (0.34 + sway), D, cx, D);
+        ctx.bezierCurveTo(cx + half * (0.34 - sway), D, cx + half * 0.58, 0, cx + half, 0);
+      };
+      path();
+      const fill = ctx.createLinearGradient(0, 0, 0, D);
+      fill.addColorStop(0, 'rgba(16,24,34,0.3)');
+      fill.addColorStop(1, 'rgba(16,24,34,0.75)');
+      ctx.fillStyle = fill;
+      ctx.fill();
+      path();
+      ctx.strokeStyle = rgba(C.ink, 0.22);
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      const inner = Math.min(1, Math.max(0, (e - 0.55) / 0.45));
+      if (inner > 0) {
+        // The eyes follow the moon he's working with, wherever it is on its orbit right now.
+        const fm = s.focus && MOONS.find((m) => m.id === s.focus);
+        if (fm) {
+          const p = moonPos(fm, cx, cy, R);
+          s.lookAt = { x: Math.max(-1, Math.min(1, (p.x - cx) / (R * 0.6))), y: Math.max(-1, Math.min(1, (p.y - cy) / (R * 0.35))) };
+        }
+        ctx.save();
+        path();
+        ctx.closePath();
+        ctx.clip();
+        orbits(ctx, cx, cy, R, inner);
+        moons(ctx, cx, cy, R, inner, false);
+        face(ctx, cx, cy, R * 0.32, inner);
+        moons(ctx, cx, cy, R, inner, true);
+        pulses(ctx, cx, cy, R, inner);
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+
+    // ---- The desktop pill: a dot at rest, a pill while he works ----
+    function drawDesk() {
+      const { ctx, W } = desk;
+      ctx.clearRect(0, 0, W, desk.H);
+      s.glowFrame = ease(s.glowFrame || 0, s.status === 'desktop' ? 1 : 0, 4, 1 / 60);
+      if (s.glowFrame > 0.01) {
+        // The soft glow round the monitor Harv is working on (today's glow.html).
+        const k = s.glowFrame * (reduced ? 0.8 : 0.7 + Math.sin(s.t * 2) * 0.15);
+        ctx.save();
+        ctx.shadowColor = rgba(C.accent, 0.9 * k);
+        ctx.shadowBlur = 22;
+        ctx.strokeStyle = rgba(C.accent, 0.55 * k);
+        ctx.lineWidth = 2;
+        ctx.strokeRect(1, 1, W - 2, desk.H - 2);
+        ctx.restore();
+      }
+      const show = s.deskShow;
+      if (show < 0.01) return;
+      const p = s.pill;
+      const wFull = Math.min(360, W - 32);
+      const w = 12 + (wFull - 12) * p,
+        h = 12 + 28 * p;
+      const x = W / 2 - w / 2,
+        y = 8 - (1 - show) * (h + 14);
+      ctx.save();
+      ctx.globalAlpha = show;
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, h / 2);
+      ctx.fillStyle = 'rgba(8,12,18,0.92)';
+      ctx.fill();
+      ctx.strokeStyle = rgba(tint(), 0.35 + s.flash * 0.5);
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      if (p < 0.3) {
+        const b = reduced ? 1 : 0.7 + Math.sin(s.t * 1.6) * 0.3;
+        ctx.beginPath();
+        ctx.arc(W / 2, y + h / 2, 2.4, 0, 6.29);
+        ctx.fillStyle = rgba(tint(), b * (1 - p * 3));
+        ctx.fill();
+      }
+      const inner = Math.max(0, (p - 0.6) / 0.4);
+      if (inner > 0) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.roundRect(x, y, w, h, h / 2);
+        ctx.clip();
+        face(ctx, x + h / 2 + 2, y + h / 2, h * 0.36, inner);
+        ctx.font = '12px IBM Plex Mono, monospace';
+        ctx.fillStyle = rgba(s.status === 'waiting' ? C.warn : C.ink, inner);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        const text = s.label.length > 30 ? s.label.slice(0, 29) + '…' : s.label;
+        ctx.fillText(text, x + h + 8, y + h / 2 + 1);
+        if (s.status === 'desktop') {
+          // Desktop control: the same pill carries STOP, like today's control pill.
+          const bw = 58,
+            bh = h - 12,
+            bx = x + w - bw - 6,
+            by = y + 6;
+          ctx.beginPath();
+          ctx.roundRect(bx, by, bw, bh, bh / 2);
+          ctx.fillStyle = rgba(C.warn, 0.9 * inner);
+          ctx.fill();
+          ctx.fillStyle = rgba('#0f1620', inner);
+          ctx.font = '600 11px IBM Plex Mono, monospace';
+          ctx.textAlign = 'center';
+          ctx.fillText('STOP ■', bx + bw / 2, by + bh / 2 + 1);
+          ctx.restore();
+          ctx.restore();
+          return;
+        }
+        // The six moons as dots on the right; the one in use lights up.
+        MOONS.forEach((m, i) => {
+          const g = s.glow[m.id];
+          const dx = x + w - 16 - (MOONS.length - 1 - i) * 9;
+          ctx.beginPath();
+          ctx.arc(dx, y + h / 2, 2 + g * 1.4, 0, 6.29);
+          ctx.fillStyle = g > 0.05 ? rgba('#ffffff', (0.5 + g * 0.5) * inner) : rgba(tint(), 0.35 * inner);
+          ctx.fill();
+        });
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+
+    function frame(now) {
+      const dt = Math.min(0.05, (now - s.last) / 1000);
+      s.last = now;
+      s.t += dt;
+      s.linger = Math.max(0, s.linger - dt);
+      const on = active();
+      // A soft spring: the drop falls, overshoots a touch and settles, like something slack.
+      if (reduced) s.ext = ease(s.ext, on ? 1 : 0, 6, dt);
+      else {
+        s.extV = (s.extV || 0) + ((on ? 1 : 0) - s.ext) * 38 * dt - (s.extV || 0) * 7.5 * dt;
+        s.ext = Math.max(0, s.ext + s.extV * dt);
+      }
+      s.pill = ease(s.pill, on ? 1 : 0, on ? 6 : 8, dt);
+      s.chatShow = ease(s.chatShow, s.overChat ? 0 : 1, s.overChat ? 12 : 5, dt);
+      // While he drives the desktop the pill stays put under the mouse: STOP must be reachable.
+      const deskAway = s.overDesk && s.status !== 'desktop';
+      s.deskShow = ease(s.deskShow, deskAway ? 0 : 1, deskAway ? 12 : 5, dt);
+      s.flash = Math.max(0, s.flash - dt * 1.4);
+      s.shake = Math.max(0, s.shake - dt * 1.1);
+      // Blinks now and then while calm.
+      s.nextBlink -= dt;
+      if (s.nextBlink <= 0 && !reduced) {
+        s.blink = 1;
+        s.nextBlink = 2.5 + Math.random() * 3;
+      }
+      s.blink = Math.max(0, s.blink - dt * 7);
+      // Eyes drift back to centre once he's done with a moon.
+      if (s.focus && (s.t > s.focusUntil || !['working', 'desktop'].includes(s.status))) {
+        s.focus = null;
+        s.lookAt = null;
+      }
+      const want = s.lookAt ? s.lookAt : { x: 0, y: 0 };
+      s.look.x = ease(s.look.x, want.x, 6, dt);
+      s.look.y = ease(s.look.y, want.y, 6, dt);
+      for (const id in s.glow) s.glow[id] = Math.max(0, s.glow[id] - dt * 0.8);
+      for (const p of s.pulses) {
+        p.k += dt * 1.5;
+        if (p.k >= 1 && !p.hit) {
+          p.hit = true;
+          s.glow[p.to] = 1;
+        }
+      }
+      s.pulses = s.pulses.filter((p) => p.k < 1.1);
+      drawChat();
+      drawDesk();
+      requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+
+    // Mouse near: he pulls back up.
+    const panel = document.getElementById('panel');
+    panel.addEventListener('pointermove', (e) => {
+      const r = chat.box.getBoundingClientRect();
+      const x = e.clientX - r.left,
+        y = e.clientY - r.top;
+      const R = Math.max(56, Math.min(84, chat.W * 0.07)) * Math.max(0.15, s.ext);
+      s.overChat = Math.abs(x - chat.W / 2) < R * 1.8 + 30 && y < R * 2 + 50;
+    });
+    panel.addEventListener('pointerleave', () => (s.overChat = false));
+    const deskEl = document.getElementById('desk');
+    deskEl.addEventListener('pointermove', (e) => {
+      const r = deskEl.getBoundingClientRect();
+      const x = e.clientX - r.left,
+        y = e.clientY - r.top;
+      s.overDesk = Math.abs(x - r.width / 2) < Math.min(200, r.width / 2) && y < 70;
+    });
+    deskEl.addEventListener('pointerleave', () => (s.overDesk = false));
+
+    // Status
+    const sDot = document.getElementById('sDot'),
+      sLabel = document.getElementById('sLabel'),
+      sExtra = document.getElementById('sExtra');
+    const lastStep = document.getElementById('lastStep');
+    function setStatus(st, opt = {}) {
+      const wasActive = s.status !== 'idle';
+      s.status = st;
+      const [dot, label, extra, col] = STATUS[st];
+      s.label = opt.label || label;
+      sDot.textContent = dot;
+      sDot.style.color = col;
+      sLabel.textContent = s.label;
+      sLabel.style.color = st === 'idle' ? '' : col;
+      sExtra.textContent = opt.extra ?? extra;
+      if (st === 'error') s.shake = 1;
+      if (st === 'idle' && wasActive) {
+        s.flash = 1;
+        s.linger = 2;
+        s.label = 'done';
+      }
+      if (st !== 'working') s.lookAt = null;
+      // On the desktop his eyes stay on the desktop moon.
+      if (st === 'desktop') {
+        s.focus = 'desktop';
+        s.focusUntil = Infinity;
+        s.glow.desktop = 1;
+      }
+      document.querySelectorAll('[data-status]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.status === st)));
+    }
+    function tool(to, text, label) {
+      s.pulses.push({ to, k: 0 });
+      // The eyes turn to that moon and stay on it while he works with it.
+      s.focus = to;
+      s.focusUntil = s.t + 2.4;
+      lastStep.textContent = `▸ ${text}`;
+      if (label) setStatus('working', { label });
+    }
+
+    const SCRIPT = [
+      [0, () => setStatus('thinking')],
+      [1800, () => tool('files', 'read StatsDetails.tsx', 'working · reading StatsDetails.tsx')],
+      [2700, () => tool('files', 'read StatsPanel.tsx', 'working · reading StatsPanel.tsx')],
+      [3600, () => tool('memory', 'checked notes on the stats panel', 'working · checking his notes')],
+      [4600, () => tool('files', 'edited StatsDetails.tsx', 'working · editing StatsDetails.tsx')],
+      [5600, () => tool('shell', 'ran the web tests', 'working · running the tests')],
+      [
+        6500,
+        () => {
+          s.helpers = [0, 2.1];
+          tool('agents', 'started 2 helpers', 'working · 2 helpers');
+        },
+      ],
+      [8000, () => tool('web', 'searched the web', 'working · searching the web')],
+      [
+        9000,
+        () => {
+          s.helpers = [];
+          tool('shell', 'ran the build', 'working · building');
+        },
+      ],
+      [
+        10000,
+        () => {
+          setStatus('desktop');
+          lastStep.textContent = '▸ desktop · open Calculator';
+        },
+      ],
+      [
+        12600,
+        () => {
+          setStatus('waiting');
+          lastStep.textContent = '! waiting for your yes · #1 Uninstall the old LHM version';
+        },
+      ],
+      [15400, () => tool('shell', 'uninstalled the old LHM version', 'working · finishing')],
+      [
+        16800,
+        () => {
+          setStatus('idle', { extra: 'last reply 17s · ↓ 1.2k tokens' });
+          lastStep.textContent = '▸ 10 steps · 17s';
+        },
+      ],
+    ];
+    let timers = [];
+    const stop = () => {
+      timers.forEach(clearTimeout);
+      timers = [];
+      s.helpers = [];
+    };
+    document.getElementById('play').addEventListener('click', () => {
+      stop();
+      for (const [at, fn] of SCRIPT) timers.push(setTimeout(fn, at));
+    });
+    document.querySelectorAll('[data-status]').forEach((b) =>
+      b.addEventListener('click', () => {
+        stop();
+        setStatus(b.dataset.status);
+        if (b.dataset.status === 'working') {
+          const loop = () => {
+            if (s.status !== 'working') return;
+            const m = MOONS[Math.floor(Math.random() * 5)];
+            tool(m.id, `used ${m.label}`);
+            timers.push(setTimeout(loop, 1300));
+          };
+          loop();
+        }
+      }),
+    );
+    setStatus('idle');
+  })();
+</script>

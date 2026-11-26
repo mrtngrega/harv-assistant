@@ -1,0 +1,347 @@
+import type { ChildProcess } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, extname, join } from 'node:path';
+import { HARV_HOME } from '../paths.ts';
+import { WORKSPACE } from '../safety/paths.ts';
+import { CdpPage, HarvChrome } from './chrome.ts';
+
+// Image generation through the Gemini website (docs/PLAN.md §6w): Gemini's API has no
+// free tier for images, the Gemini app does. A fixed script drives Harv's own Chrome
+// profile, signed in once by the user with a Google account kept for this, so a picture
+// costs one tool call of the Claude plan and nothing else.
+
+export const GEMINI_URL = 'https://gemini.google.com/app';
+/** The page the script works in: English whatever the account's language, so its button names are the ones it looks for. */
+const WORK_URL = `${GEMINI_URL}?hl=en`;
+const PROFILE = join(HARV_HOME, 'gemini-profile');
+export const IMAGES_DIR = join(WORKSPACE, 'images');
+/** Pictures Harv may hand to Gemini to edit. */
+const INPUT_TYPES = ['.png', '.jpg', '.jpeg', '.webp'];
+const MAX_INPUT_BYTES = 10 * 1024 * 1024;
+const ANSWER_MS = 240_000;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** One picture, all steps: past this Chrome is closed and the next request can go (the full review, D22). */
+const RUN_LIMIT_MS = 6 * 60_000;
+
+/** `work`, or a GeminiProblem after `ms` (then `onLate` cleans up, which makes `work` fail on its own). */
+function withLimit<T>(work: Promise<T>, ms: number, onLate: () => void): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, fail) => {
+    timer = setTimeout(() => {
+      onLate();
+      fail(new GeminiProblem(`Gemini took longer than ${ms / 60_000} minutes, so Harv stopped it. Try again.`));
+    }, ms);
+  });
+  return Promise.race([work, late]).finally(() => clearTimeout(timer));
+}
+
+/** Tells Harv what to say: the user has something to do (sign in), or Gemini said no. */
+export class GeminiProblem extends Error {}
+
+/** "2026-10-28-1930-red-apple-on-a-table.png": a name that sorts by time and says what it is. */
+export function imageFileName(prompt: string, at: Date, ext = '.png', n = 0): string {
+  const pad = (v: number) => String(v).padStart(2, '0');
+  const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}-${pad(at.getHours())}${pad(at.getMinutes())}`;
+  const slug =
+    prompt
+      .normalize('NFKD')
+      .replace(/\p{M}/gu, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40)
+      .replace(/-+$/, '') || 'image';
+  return `${stamp}-${slug}${n ? `-${n + 1}` : ''}${ext}`;
+}
+
+/** The file extension for a picture's MIME type. */
+export function extOf(data: Buffer): string {
+  // From the bytes themselves: Gemini serves JPEGs, and a screenshot is a PNG, whatever the URL says.
+  if (data[0] === 0xff && data[1] === 0xd8) return '.jpg';
+  if (data.subarray(0, 4).toString('latin1') === 'RIFF' && data.subarray(8, 12).toString('latin1') === 'WEBP') return '.webp';
+  return '.png';
+}
+
+// ---- Page scripts (run inside gemini.google.com) ----
+
+const SIGNED_IN = `!!document.querySelector('[aria-label*="Google Account" i], img.gb_P, a[href*="SignOutOptions"]')`;
+const SIGNED_OUT = `!!document.querySelector('a[href*="ServiceLogin"], a[href*="accounts.google.com/v3/signin"]') || [...document.querySelectorAll('button, a')].some(e => e.innerText?.trim() === 'Sign in')`;
+const EDITOR = `document.querySelector('div.ql-editor[contenteditable="true"]')`;
+const BUSY = `!!document.querySelector('button[aria-label*="Stop" i]')`;
+const LAST_ANSWER = `[...document.querySelectorAll('model-response')].at(-1)`;
+/** The answer's big pictures (icons and avatars are small), and their addresses. */
+const ANSWER_IMAGE_ELEMENTS = `[...(${LAST_ANSWER}?.querySelectorAll('img') ?? [])].filter(i => i.complete && i.naturalWidth >= 256 && i.naturalHeight >= 256)`;
+const ANSWER_IMAGES = `${ANSWER_IMAGE_ELEMENTS}.map(i => i.src)`;
+
+/** Opens the "Upload & tools" menu by the prompt box (uploads, Create image). */
+const UPLOAD_MENU = `[...document.querySelectorAll('button')].find(b => /^Upload & tools/i.test(b.getAttribute('aria-label') || ''))?.click()`;
+/** The picture input Gemini's upload menu makes, and the pictures attached to the prompt so far. */
+const PICTURE_INPUT = `document.querySelector('input[type=file][accept^="image/"]')`;
+const ATTACHED = `document.querySelectorAll('img.gem-attachment-style-img').length`;
+/** The one-time "Creating content from images and files" agreement. */
+const AGREE_BUTTON = `([...document.querySelectorAll('button')].find(e => /^Agree/i.test((e.getAttribute('aria-label') || e.innerText || '').trim())) ?? null)`;
+
+/** Gemini's own words in its last answer, for when no picture came. */
+const ANSWER_TEXT = `(${LAST_ANSWER}?.querySelector('message-content')?.innerText ?? ${LAST_ANSWER}?.innerText ?? '').trim()`;
+
+/**
+ * Harv's Gemini: one picture request at a time, in a headless Chrome on Harv's Gemini
+ * profile (started for the request, closed after). Signing in opens the same profile in
+ * a window the user sees.
+ */
+export class GeminiImages {
+  private chrome: HarvChrome | null = null;
+  /** The plain window the user signs in with. */
+  private signIn: ChildProcess | null = null;
+  private queue: Promise<unknown> = Promise.resolve();
+
+  constructor(
+    private profile = PROFILE,
+    private outDir = IMAGES_DIR,
+  ) {}
+
+  /**
+   * Opens Gemini in a plain Chrome window on Harv's profile, for the user to sign in (or check
+   * the account). Pictures wait until it's closed: one profile can't be open twice.
+   */
+  async openSignIn(): Promise<void> {
+    // Already open: Chrome hands the URL to that window (a new tab there).
+    if (this.signIn?.exitCode === null) {
+      HarvChrome.openWindow(this.profile, GEMINI_URL);
+      return;
+    }
+    await this.queue;
+    this.chrome?.quit();
+    this.chrome = null;
+    const proc = HarvChrome.openWindow(this.profile, GEMINI_URL);
+    this.signIn = proc;
+    proc.once('exit', () => {
+      if (this.signIn === proc) this.signIn = null;
+    });
+  }
+
+  /** Makes pictures for `prompt` (optionally from the user's pictures) and returns where they were saved and what Gemini said. */
+  generate(prompt: string, inputs: string[] = []): Promise<{ paths: string[]; text: string }> {
+    // An overall limit, so one stuck picture never blocks every later one (the full review, D22).
+    const run = this.queue.then(() => withLimit(this.run(prompt, inputs), RUN_LIMIT_MS, () => this.close()));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async run(prompt: string, inputs: string[]): Promise<{ paths: string[]; text: string }> {
+    const files = inputs.map(checkInput);
+    if (this.signIn?.exitCode === null) {
+      throw new GeminiProblem('The Gemini sign-in window is still open. The user closes it (after signing in), then asks again.');
+    }
+    const chrome = await HarvChrome.launch(this.profile);
+    this.chrome = chrome;
+    let page: Awaited<ReturnType<HarvChrome['open']>>;
+    try {
+      page = await chrome.open(WORK_URL);
+    } catch (err) {
+      // Left running, it kept the profile locked and every next try failed with "Chrome didn't start" (D22).
+      chrome.quit();
+      if (this.chrome === chrome) this.chrome = null;
+      throw err;
+    }
+    try {
+      await page.send('Network.enable');
+      const images = new Map<string, string>();
+      page.on('Network.responseReceived', (p) => {
+        const r = p.response as { url: string; mimeType: string };
+        if (/^image\//.test(r.mimeType)) images.set(r.url, p.requestId as string);
+      });
+      // Headless Chrome says so in its user agent; Gemini gets the normal one.
+      const ua = await page.eval<string>('navigator.userAgent');
+      await page.send('Network.setUserAgentOverride', { userAgent: ua.replace('HeadlessChrome', 'Chrome') });
+      await page.send('Page.reload');
+      await page.send('Page.enable');
+      // A value, not the element itself (an element can't be sent back by value).
+      if (!(await page.waitFor(`!!${EDITOR}`, 30_000)))
+        throw new GeminiProblem('The Gemini page changed (no prompt box found), so the image script needs an update.');
+      // A cookie question (signed out, or a new profile) is answered with the least.
+      await page.eval(
+        `[...document.querySelectorAll('button')].find(e => /^(Reject all|Odmietnuť všetko)$/.test(e.innerText.trim()))?.click()`,
+      );
+      await sleep(1200);
+      if (!(await page.eval<boolean>(SIGNED_IN)) && (await page.eval<boolean>(SIGNED_OUT))) {
+        throw new GeminiProblem('signed-out');
+      }
+      for (const file of files) await this.attach(page, file);
+      // Gemini's "Create image" tool, so the answer is a picture and not a description of one.
+      await page.eval(UPLOAD_MENU);
+      await sleep(1000);
+      await page.eval(
+        `[...document.querySelectorAll('button, [role=menuitem]')].find(b => /^Create image/i.test((b.getAttribute('aria-label') || b.innerText || '').trim()))?.click()`,
+      );
+      await sleep(800);
+      await page.eval(`${EDITOR}.focus()`);
+      await page.send('Input.insertText', { text: prompt });
+      await sleep(400);
+      const sent = await page.eval<boolean>(
+        `(() => { const b = document.querySelector('button[aria-label*="Send" i]'); if (!b || b.disabled) return false; b.click(); return true; })()`,
+      );
+      if (!sent) throw new GeminiProblem('The Gemini page changed (no Send button), so the image script needs an update.');
+
+      // The answer: done when Gemini stops writing and its pictures have loaded.
+      const start = Date.now();
+      let srcs: string[] = [];
+      let quietSince = 0;
+      while (Date.now() - start < ANSWER_MS) {
+        await sleep(1500);
+        const busy = await page.eval<boolean>(BUSY).catch(() => true);
+        srcs = await page.eval<string[]>(ANSWER_IMAGES).catch(() => []);
+        if (busy) {
+          quietSince = 0;
+          continue;
+        }
+        quietSince ||= Date.now();
+        // Pictures can arrive a moment after the text.
+        if (srcs.length && Date.now() - quietSince > 2500) break;
+        if (!srcs.length && Date.now() - quietSince > 12_000 && Date.now() - start > 15_000) break;
+      }
+      const text = await page.eval<string>(ANSWER_TEXT).catch(() => '');
+      if (!srcs.length) {
+        throw new GeminiProblem(
+          text
+            ? `Gemini answered without a picture: "${text.slice(0, 600)}"`
+            : 'Gemini gave no picture in time (4 minutes), or the page changed.',
+        );
+      }
+      mkdirSync(this.outDir, { recursive: true });
+      const at = new Date();
+      const paths: string[] = [];
+      for (const [i, src] of srcs.entries()) {
+        // Full quality from Gemini's own download (the page only shows a smaller preview); the preview if that fails.
+        const img = (await this.download(page, i)) ?? (await this.bytes(page, src, images));
+        if (!img) continue;
+        const ext = extOf(img);
+        let name = imageFileName(prompt, at, ext, i);
+        for (let n = 2; existsSync(join(this.outDir, name)); n++) name = imageFileName(`${prompt} ${n}`, at, ext, i);
+        const path = join(this.outDir, name);
+        writeFileSync(path, img);
+        paths.push(path);
+      }
+      if (!paths.length) throw new GeminiProblem('Gemini made a picture, but Harv couldn’t save it (the page changed?).');
+      return { paths, text };
+    } finally {
+      page.close();
+      chrome.quit();
+      if (this.chrome === chrome) this.chrome = null;
+    }
+  }
+
+  /**
+   * One of the user's pictures, through Gemini's own upload: its "Upload & tools" menu makes a
+   * picture file input, which Chrome fills directly (a pasted or dropped file is ignored). The
+   * first upload on an account asks to agree to its rules about rights to pictures: agreed.
+   */
+  private async attach(page: CdpPage, file: { path: string }): Promise<void> {
+    const name = basename(file.path);
+    const changed = () => new GeminiProblem(`Gemini didn’t take the picture ${name} (the page changed?).`);
+    const before = await page.eval<number>(ATTACHED);
+    const give = async () => {
+      await page.eval(UPLOAD_MENU);
+      if (!(await page.waitFor(`!!${PICTURE_INPUT}`, 8000))) throw changed();
+      const { result } = await page.send<{ result: { objectId?: string } }>('Runtime.evaluate', { expression: PICTURE_INPUT });
+      if (!result.objectId) throw changed();
+      await page.send('DOM.setFileInputFiles', { files: [file.path], objectId: result.objectId });
+      await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    };
+    await give();
+    if (await page.waitFor(`${ATTACHED} > ${before} || ${AGREE_BUTTON} !== null`, 15_000)) {
+      if (await page.eval<boolean>(`(() => { const b = ${AGREE_BUTTON}; if (!b) return false; b.click(); return true; })()`)) {
+        await sleep(1000);
+        if (!((await page.eval<number>(ATTACHED)) > before)) await give();
+      }
+    }
+    if (!(await page.waitFor(`${ATTACHED} > ${before}`, 20_000))) throw changed();
+    await sleep(1000);
+  }
+
+  /**
+   * The answer's picture number `i` in full size: Gemini's "Download full size image" button (it
+   * shows when the picture is hovered), saved by Chrome into a folder of its own. Null if it fails.
+   */
+  private async download(page: CdpPage, i: number): Promise<Buffer | null> {
+    const dir = mkdtempSync(join(tmpdir(), 'harv-gemini-'));
+    try {
+      await page.send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
+      const box = await page.eval<{ x: number; y: number } | null>(
+        `(() => { const img = ${ANSWER_IMAGE_ELEMENTS}[${i}]; if (!img) return null; img.scrollIntoView({ block: 'center' }); const r = img.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`,
+      );
+      if (!box) return null;
+      await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y });
+      await sleep(600);
+      // The button by this picture (several pictures each have one), else the answer's n-th.
+      const clicked = await page.eval<boolean>(`(() => {
+        const img = ${ANSWER_IMAGE_ELEMENTS}[${i}];
+        const isDownload = (b) => /^Download full size/i.test(b.getAttribute('aria-label') || '');
+        const near = img.closest('generated-image, single-image, .image-container');
+        const b = (near && [...near.querySelectorAll('button')].find(isDownload)) || [...${LAST_ANSWER}.querySelectorAll('button')].filter(isDownload)[${i}];
+        if (!b) return false;
+        b.click();
+        return true;
+      })()`);
+      if (!clicked) return null;
+      const end = Date.now() + 60_000;
+      while (Date.now() < end) {
+        await sleep(500);
+        const done = readdirSync(dir).find((f) => !/\.(crdownload|tmp)$/i.test(f));
+        if (done) {
+          await sleep(300);
+          const data = readFileSync(join(dir, done));
+          // A picture, not an error page: JPEG, WebP, or a real PNG (extOf falls back to .png).
+          if (extOf(data) !== '.png' || data.subarray(1, 4).toString('latin1') === 'PNG') return data;
+          return null;
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** A picture's bytes: fetched by the page, else from Chrome's network log, else a screenshot of it. */
+  private async bytes(page: CdpPage, src: string, seen: Map<string, string>): Promise<Buffer | null> {
+    const fetched = await page
+      .eval<string | null>(
+        `(async () => { try { const r = await fetch(${JSON.stringify(src)}, { credentials: 'include' }); if (!r.ok) return null; const b = await r.blob(); return await new Promise(ok => { const f = new FileReader(); f.onload = () => ok(f.result); f.readAsDataURL(b); }); } catch { return null; } })()`,
+      )
+      .catch(() => null);
+    const m = fetched && /^data:([^;]+);base64,(.+)$/.exec(fetched);
+    if (m && m[1]!.startsWith('image/')) return Buffer.from(m[2]!, 'base64');
+    const requestId = seen.get(src);
+    if (requestId) {
+      const body = await page.send<{ body: string; base64Encoded: boolean }>('Network.getResponseBody', { requestId }).catch(() => null);
+      if (body?.base64Encoded) return Buffer.from(body.body, 'base64');
+    }
+    const box = await page.eval<{ x: number; y: number; width: number; height: number } | null>(
+      `(() => { const i = [...document.querySelectorAll('img')].find(e => e.src === ${JSON.stringify(src)}); if (!i) return null; i.scrollIntoView(); const r = i.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })()`,
+    );
+    if (!box) return null;
+    const shot = await page
+      .send<{ data: string }>('Page.captureScreenshot', { format: 'png', clip: { ...box, scale: 2 } })
+      .catch(() => null);
+    return shot ? Buffer.from(shot.data, 'base64') : null;
+  }
+
+  close(): void {
+    this.chrome?.quit();
+    this.chrome = null;
+  }
+}
+
+/** A picture the user gave Harv: it must exist, be a picture and fit. */
+function checkInput(path: string): { path: string } {
+  if (!INPUT_TYPES.includes(extname(path).toLowerCase())) throw new GeminiProblem(`${basename(path)} isn’t a PNG, JPG or WebP picture.`);
+  const st = statSync(path, { throwIfNoEntry: false });
+  if (!st?.isFile()) throw new GeminiProblem(`${path} doesn’t exist.`);
+  if (st.size > MAX_INPUT_BYTES) throw new GeminiProblem(`${basename(path)} is bigger than 10 MB.`);
+  return { path };
+}

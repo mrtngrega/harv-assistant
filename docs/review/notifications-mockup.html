@@ -1,0 +1,2023 @@
+<title>Harv Notifications</title>
+<meta name="claude:viewport-fit-sides" content="cover" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" />
+<style>
+  /* Layout: the control strip, two stages (Harv's chat with the hammock and its bubble; the desktop with the pill
+     and a Windows toast), then the Settings row and notes. Tokens and drawing follow presence-mockup.html. */
+  :root {
+    --glass: rgba(16, 24, 34, 0.55);
+    --solid: rgba(16, 24, 34, 0.94);
+    --line: rgba(220, 232, 245, 0.14);
+    --ink: #dce8f5;
+    --muted: #8fa3b8;
+    --faint: #5d6f82;
+    --accent: #a8c8e8;
+    --warn: #f2b880;
+    --ok: #9fd8b4;
+    --mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    color-scheme: dark;
+  }
+  [hidden] {
+    display: none !important;
+  }
+  html,
+  body {
+    min-height: 100%;
+  }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 30% 10%, rgba(120, 150, 175, 0.35), transparent 60%),
+      radial-gradient(900px 500px at 80% 90%, rgba(40, 60, 80, 0.6), transparent 60%),
+      linear-gradient(180deg, #4a5a68 0%, #26323e 45%, #121a22 100%);
+    background-attachment: fixed;
+    color: var(--ink);
+    font: 13px/1.5 var(--mono);
+    overflow-x: hidden;
+  }
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding-block: 20px 28px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+  }
+  h2 {
+    margin: 6px 0 0;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    color: var(--faint);
+  }
+  h2 span {
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+  .lede {
+    margin: 0;
+    color: var(--muted);
+    max-width: 80ch;
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 22px;
+    align-items: center;
+  }
+  .group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    min-width: 0;
+  }
+  .group > span {
+    color: var(--faint);
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    margin-right: 4px;
+  }
+  button {
+    font-family: var(--mono);
+  }
+  button.chip {
+    font: 12px var(--mono);
+    color: var(--muted);
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 5px 10px;
+    cursor: pointer;
+  }
+  button.chip:hover {
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.06);
+  }
+  button.chip.amber {
+    color: var(--warn);
+    border-color: rgba(242, 184, 128, 0.35);
+  }
+  button.chip.urgent {
+    color: #0f1620;
+    background: var(--warn);
+    border-color: var(--warn);
+    font-weight: 600;
+  }
+  button.chip[aria-pressed='true'] {
+    color: #0f1620;
+    background: var(--accent);
+    border-color: var(--accent);
+    font-weight: 600;
+  }
+  button:focus-visible,
+  input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* ---- The app stage ---- */
+  .panel {
+    position: relative;
+    border-radius: 18px;
+    background: var(--glass);
+    border: 1px solid var(--line);
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
+    overflow: hidden;
+    min-width: 0;
+  }
+  .apphead {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .logo {
+    position: relative;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 3px 8px;
+    cursor: pointer;
+  }
+  .logo:hover,
+  .logo[aria-expanded='true'] {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: var(--line);
+  }
+  .undot {
+    position: absolute;
+    top: 2px;
+    right: 1px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
+  }
+  .models {
+    display: flex;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--faint);
+  }
+  .models span {
+    padding: 2px 8px;
+    border-radius: 6px;
+  }
+  .models .on {
+    color: #0f1620;
+    background: var(--accent);
+    font-weight: 600;
+  }
+  .bar {
+    display: flex;
+    align-items: flex-end;
+    gap: 4px;
+    padding: 8px 10px 0;
+    border-bottom: 1px solid var(--line);
+    overflow: hidden;
+  }
+  .tab {
+    font-size: 12px;
+    color: var(--muted);
+    padding: 8px 14px;
+    border-radius: 10px 10px 0 0;
+    white-space: nowrap;
+  }
+  .tab.on {
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(220, 232, 245, 0.18);
+    border-bottom: 0;
+  }
+  .stage {
+    position: relative;
+    height: clamp(380px, 46vw, 470px);
+  }
+  .stage canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+  .log {
+    position: absolute;
+    left: 22px;
+    right: 22px;
+    bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    color: var(--muted);
+  }
+  .log .you {
+    color: var(--ink);
+    background: rgba(168, 200, 232, 0.1);
+    border-left: 2px solid var(--accent);
+    padding: 6px 10px;
+    border-radius: 6px;
+  }
+  .log .you b {
+    color: var(--accent);
+    font-weight: 400;
+  }
+  .log .harv b {
+    color: var(--ok);
+    font-weight: 400;
+  }
+  .log .step {
+    color: var(--faint);
+  }
+  .status {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    border-top: 1px solid var(--line);
+    padding: 8px 22px;
+    font-size: 12px;
+    min-width: 0;
+  }
+  .status .dot {
+    width: 12px;
+    text-align: center;
+    color: var(--accent);
+  }
+  .status .extra {
+    color: var(--faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .prompt {
+    padding: 6px 22px 14px;
+    color: var(--faint);
+  }
+  .prompt b {
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .echo {
+    margin: -6px 2px 0;
+    min-height: 1.5em;
+    font-size: 12px;
+    color: var(--ok);
+  }
+
+  /* ---- The speech bubble: hangs under the hammock, its tail points up at Harv's face ---- */
+  .bubble {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    transform: translateX(-50%);
+    z-index: 3;
+    box-sizing: border-box;
+    width: max-content;
+    max-width: min(440px, calc(100% - 24px));
+    border-radius: 14px;
+    background: var(--solid);
+    border: 1px solid rgba(168, 200, 232, 0.45);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(22px);
+    -webkit-backdrop-filter: blur(22px);
+  }
+  .bubble::before {
+    content: '';
+    position: absolute;
+    top: -6px;
+    left: 50%;
+    width: 10px;
+    height: 10px;
+    margin-left: -5px;
+    transform: rotate(45deg);
+    background: #121b26;
+    border-left: 1px solid;
+    border-top: 1px solid;
+    border-color: inherit;
+  }
+  .bubble.open {
+    width: min(440px, calc(100% - 24px));
+  }
+  .b-line {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    min-width: 0;
+    padding: 8px 14px;
+    font-size: 13px;
+    color: var(--ink);
+    background: none;
+    border: 0;
+    border-radius: 14px;
+    cursor: pointer;
+    text-align: left;
+  }
+  .b-line:hover {
+    background: rgba(255, 255, 255, 0.05);
+  }
+  .b-ic {
+    flex: none;
+    color: var(--accent);
+  }
+  .b-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .bubble.open .b-text {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .b-more {
+    flex: none;
+    font-size: 11px;
+    font-weight: 600;
+    color: #0f1620;
+    background: var(--accent);
+    border-radius: 9px;
+    padding: 0 7px;
+  }
+  .b-detail {
+    padding: 2px 14px 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--muted);
+    border-top: 1px solid var(--line);
+    margin-top: 2px;
+    padding-top: 10px;
+  }
+  .b-detail p {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .b-acts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .act {
+    font-size: 12px;
+    color: var(--accent);
+    background: none;
+    border: 1px solid rgba(168, 200, 232, 0.5);
+    border-radius: 6px;
+    padding: 4px 9px;
+    cursor: pointer;
+  }
+  .act:hover {
+    background: rgba(168, 200, 232, 0.15);
+  }
+  .act.quiet {
+    color: var(--muted);
+    border-color: var(--line);
+  }
+  .act.quiet:hover {
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.1);
+  }
+  .b-fade {
+    position: absolute;
+    left: 14px;
+    right: 14px;
+    bottom: 3px;
+    height: 1px;
+    background: rgba(168, 200, 232, 0.55);
+    transform-origin: left;
+    transform: scaleX(0);
+  }
+  .b-fade.run {
+    animation: fadebar 6s linear forwards;
+  }
+  @keyframes fadebar {
+    from {
+      transform: scaleX(1);
+    }
+    to {
+      transform: scaleX(0);
+    }
+  }
+  /* Warning: amber, stays. */
+  .bubble[data-level='warning'],
+  .bubble[data-level='urgent'] {
+    border-color: rgba(242, 184, 128, 0.65);
+  }
+  .bubble[data-level='warning'] .b-line,
+  .bubble[data-level='urgent'] .b-line,
+  .bubble[data-level='warning'] .b-ic,
+  .bubble[data-level='urgent'] .b-ic {
+    color: var(--warn);
+  }
+  .bubble[data-level='warning'] .b-more,
+  .bubble[data-level='urgent'] .b-more {
+    background: var(--warn);
+  }
+  /* Urgent: the same amber, stronger: a filled, thicker, glowing bubble. */
+  .bubble[data-level='urgent'] {
+    border: 2px solid var(--warn);
+    background: linear-gradient(rgba(242, 184, 128, 0.16), rgba(242, 184, 128, 0.16)), var(--solid);
+    box-shadow:
+      0 0 0 4px rgba(242, 184, 128, 0.12),
+      0 0 28px rgba(242, 184, 128, 0.35),
+      0 12px 32px rgba(0, 0, 0, 0.4);
+    animation: urgent 1.8s ease-in-out infinite;
+  }
+  .bubble[data-level='urgent']::before {
+    top: -7px;
+    border-width: 2px;
+    background: #2d2a2a;
+  }
+  .bubble[data-level='urgent'] .b-line {
+    font-weight: 600;
+  }
+  @keyframes urgent {
+    50% {
+      box-shadow:
+        0 0 0 6px rgba(242, 184, 128, 0.2),
+        0 0 40px rgba(242, 184, 128, 0.5),
+        0 12px 32px rgba(0, 0, 0, 0.4);
+    }
+  }
+
+  /* ---- Recent ---- */
+  .recent {
+    position: absolute;
+    z-index: 6;
+    box-sizing: border-box;
+    width: min(360px, calc(100% - 20px));
+    max-height: 300px;
+    overflow-y: auto;
+    border-radius: 12px;
+    background: var(--solid);
+    border: 1px solid rgba(168, 200, 232, 0.35);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    padding: 8px 0;
+    font-size: 12px;
+  }
+  #appRecent {
+    top: 42px;
+    left: 10px;
+  }
+  #deskRecent {
+    top: 54px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-height: 230px;
+  }
+  .r-head {
+    padding: 2px 14px 6px;
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    color: var(--faint);
+  }
+  .r-away {
+    margin: 0 8px 6px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    color: var(--accent);
+    background: rgba(168, 200, 232, 0.1);
+  }
+  .r-row {
+    display: flex;
+    gap: 10px;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 5px 14px;
+    font-size: 12px;
+    color: var(--ink);
+    background: none;
+    border: 0;
+    border-left: 2px solid transparent;
+    text-align: left;
+    cursor: pointer;
+  }
+  .r-row:hover {
+    background: rgba(255, 255, 255, 0.06);
+  }
+  .r-row.away {
+    border-left-color: var(--accent);
+  }
+  .r-row time {
+    flex: none;
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .r-row span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .r-row[data-level='warning'] span,
+  .r-row[data-level='urgent'] span {
+    color: var(--warn);
+  }
+  .r-row[data-level='urgent'] span {
+    font-weight: 600;
+  }
+
+  /* ---- The desktop stage ---- */
+  .desk {
+    position: relative;
+    height: 320px;
+    border-radius: 14px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    background:
+      radial-gradient(500px 200px at 70% 80%, rgba(70, 110, 90, 0.35), transparent 70%),
+      linear-gradient(160deg, #2d3b47 0%, #1b252e 60%, #121920 100%);
+  }
+  .desk .win {
+    position: absolute;
+    left: 8%;
+    top: 78px;
+    width: 46%;
+    height: 150px;
+    border-radius: 8px;
+    background: rgba(230, 236, 242, 0.08);
+    border: 1px solid var(--line);
+    color: var(--faint);
+    font-size: 11px;
+    padding: 10px 12px;
+    box-sizing: border-box;
+  }
+  .desk .win.two {
+    left: 58%;
+    top: 110px;
+    width: 30%;
+    height: 100px;
+  }
+  .desk .taskbar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 26px;
+    background: rgba(10, 14, 20, 0.6);
+  }
+  /* The pill: a dot at rest, the line for ~6 s, then the face with a dot until seen. */
+  .pill {
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 4;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    height: 40px;
+    width: 40px;
+    max-width: calc(100% - 32px);
+    padding: 0;
+    border-radius: 20px;
+    background: rgba(8, 12, 18, 0.92);
+    border: 1px solid rgba(168, 200, 232, 0.35);
+    color: var(--ink);
+    font-size: 12px;
+    overflow: hidden;
+    cursor: pointer;
+    text-align: left;
+    transition:
+      width 0.35s cubic-bezier(0.3, 1.2, 0.4, 1),
+      height 0.35s,
+      top 0.35s,
+      border-color 0.3s;
+  }
+  .pill canvas {
+    flex: none;
+    width: 38px;
+    height: 38px;
+    transition: opacity 0.25s;
+  }
+  .pill[data-mode='rest'] {
+    top: 2px;
+    width: 28px;
+    height: 28px;
+    background: none;
+    border-color: transparent;
+  }
+  .pill[data-mode='rest'] canvas {
+    opacity: 0;
+  }
+  .pill[data-mode='rest']::before {
+    content: '';
+    position: absolute;
+    left: 7px;
+    top: 7px;
+    width: 12px;
+    height: 12px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    border: 1px solid rgba(168, 200, 232, 0.35);
+    background: radial-gradient(circle, var(--accent) 0 2.2px, rgba(8, 12, 18, 0.92) 3px);
+  }
+  .pill[data-mode='say'],
+  .pill[data-mode='work'] {
+    width: 360px;
+  }
+  .pill[data-level='warning']:not([data-mode='rest']),
+  .pill[data-level='urgent']:not([data-mode='rest']) {
+    border-color: rgba(242, 184, 128, 0.75);
+  }
+  .pill[data-level='urgent']:not([data-mode='rest']) {
+    box-shadow: 0 0 18px rgba(242, 184, 128, 0.4);
+  }
+  .p-text {
+    flex: 1;
+    min-width: 0;
+    padding: 0 6px 0 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pill[data-mode='say'][data-level='warning'] .p-text,
+  .pill[data-mode='say'][data-level='urgent'] .p-text {
+    color: var(--warn);
+  }
+  .pill[data-mode='say'][data-level='urgent'] .p-text {
+    font-weight: 600;
+  }
+  .p-more {
+    flex: none;
+    margin-right: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #0f1620;
+    background: var(--accent);
+    border-radius: 9px;
+    padding: 0 7px;
+  }
+  .pill[data-level='warning'] .p-more,
+  .pill[data-level='urgent'] .p-more {
+    background: var(--warn);
+  }
+  .p-dot {
+    position: absolute;
+    left: 27px;
+    top: 5px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 1.5px solid #080c12;
+    box-shadow: 0 0 6px var(--accent);
+  }
+  .pill[data-level='warning'] .p-dot,
+  .pill[data-level='urgent'] .p-dot {
+    background: var(--warn);
+    box-shadow: 0 0 6px var(--warn);
+  }
+  /* Harv's window, brought up on the notice. */
+  .harvwin {
+    position: absolute;
+    z-index: 3;
+    left: 50%;
+    top: 62px;
+    transform: translateX(-50%);
+    box-sizing: border-box;
+    width: min(430px, calc(100% - 24px));
+    border-radius: 12px;
+    background: var(--solid);
+    border: 1px solid rgba(168, 200, 232, 0.4);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5);
+    font-size: 12px;
+    animation: rise 0.3s ease-out;
+  }
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateX(-50%) translateY(14px);
+    }
+  }
+  .hw-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px 6px 12px;
+    border-bottom: 1px solid var(--line);
+    color: var(--accent);
+    font-weight: 600;
+    letter-spacing: 0.1em;
+  }
+  .x {
+    width: 24px;
+    height: 24px;
+    font-size: 14px;
+    line-height: 1;
+    color: var(--muted);
+    background: none;
+    border: 0;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .x:hover {
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.1);
+  }
+  .hw-body {
+    padding: 10px 12px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+  .hw-body b {
+    font-weight: 500;
+    color: var(--ink);
+  }
+  .hw-body b.amber {
+    color: var(--warn);
+  }
+  .hw-body i {
+    font-style: normal;
+    color: var(--faint);
+  }
+  /* A sketch of a Windows notification: urgent ones only. */
+  .wintoast {
+    position: absolute;
+    z-index: 5;
+    right: 10px;
+    bottom: 34px;
+    box-sizing: border-box;
+    width: min(300px, calc(100% - 20px));
+    padding: 10px 12px 12px;
+    border-radius: 8px;
+    background: rgba(36, 38, 42, 0.97);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+    font: 12px/1.4 'Segoe UI', system-ui, sans-serif;
+    color: #e9e9e9;
+    animation: slidein 0.3s ease-out;
+  }
+  @keyframes slidein {
+    from {
+      transform: translateX(110%);
+    }
+  }
+  .wt-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: #b9b9b9;
+    font-size: 11px;
+    margin-bottom: 4px;
+  }
+  .wt-head i {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    background: #0c131b;
+    border: 1px solid var(--accent);
+    box-sizing: border-box;
+  }
+  .wt-head span {
+    flex: 1;
+  }
+  .wt-title {
+    font-weight: 600;
+  }
+  .wt-body {
+    color: #c8c8c8;
+    overflow-wrap: anywhere;
+  }
+  .wt-tag {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 4px);
+    font: 10px var(--mono);
+    letter-spacing: 0.1em;
+    color: var(--warn);
+    white-space: nowrap;
+  }
+
+  /* ---- Settings › Appearance, in the dashboard's settings style ---- */
+  .set {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    background: rgba(0, 0, 0, 0.25);
+    padding: 16px;
+    max-width: 560px;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+  .set header {
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 10px;
+  }
+  .set h3 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: var(--accent);
+  }
+  .set header p,
+  .set .hint {
+    margin: 0;
+    font-size: 11px;
+    color: var(--faint);
+  }
+  .set h4 {
+    margin: 0;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: var(--ink);
+  }
+  .toggle {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .toggle input {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+  }
+  .track {
+    flex: none;
+    margin-top: 2px;
+    width: 36px;
+    height: 20px;
+    box-sizing: border-box;
+    padding: 2px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.15);
+    transition: background 0.15s;
+  }
+  .track::after {
+    content: '';
+    display: block;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #0f1620;
+    transition: transform 0.15s;
+  }
+  .toggle input:checked + .track {
+    background: var(--accent);
+  }
+  .toggle input:checked + .track::after {
+    transform: translateX(16px);
+  }
+  .toggle input:focus-visible + .track {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .toggle .txt {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .toggle .txt span:last-child {
+    color: var(--faint);
+  }
+  .slider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 12px;
+  }
+  .slider > span:first-child {
+    flex: none;
+    width: 80px;
+    color: var(--muted);
+  }
+  .slider input {
+    flex: 1;
+    min-width: 0;
+    accent-color: var(--accent);
+  }
+  .slider output {
+    flex: none;
+    width: 44px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .slider.off {
+    opacity: 0.45;
+  }
+  .set .row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+  .setbtn {
+    min-height: 32px;
+    font-size: 12px;
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0 12px;
+    cursor: pointer;
+  }
+  .setbtn:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .notes {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 12px;
+  }
+  .note {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 14px;
+    background: rgba(0, 0, 0, 0.18);
+    min-width: 0;
+  }
+  .note h3 {
+    margin: 0 0 6px;
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .note p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .note p + p {
+    margin-top: 6px;
+  }
+  .note b {
+    font-weight: 500;
+    color: var(--ink);
+  }
+  .note b.amber {
+    color: var(--warn);
+  }
+
+  /* Motion off: things just appear and disappear. */
+  body.still *,
+  body.still *::before,
+  body.still *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+  body.still .b-fade {
+    display: none;
+  }
+  @media (max-width: 560px) {
+    .log .harv,
+    .log .step,
+    .models {
+      display: none;
+    }
+    .desk .win.two {
+      display: none;
+    }
+  }
+</style>
+
+<div class="wrap">
+  <h1>[HARV] PRESENCE · NOTIFICATIONS</h1>
+  <p class="lede">
+    Harv's own notices come through his presence instead of toasts. In the app the hammock drops and he says one line in a bubble; outside
+    the app the pill at the top of the screen says it, then keeps his face with a dot until you've seen it. Press a notice below, then
+    click the bubble or the pill.
+  </p>
+
+  <div class="controls">
+    <div class="group" role="group" aria-label="You are">
+      <span>YOU ARE</span>
+      <button class="chip" data-where="app" aria-pressed="true">in the app</button>
+      <button class="chip" data-where="desk" aria-pressed="false">outside the app</button>
+    </div>
+    <div class="group" role="group" aria-label="Send a notice">
+      <span>NOTICE</span>
+      <button class="chip" data-fire="reply">normal · replied in Car radio</button>
+      <button class="chip amber" data-fire="usage">warning · plan at 90%</button>
+      <button class="chip amber" data-fire="held">warning · waiting for your yes</button>
+      <button class="chip amber" data-fire="hog">warning · busy program</button>
+      <button class="chip urgent" data-fire="threat">urgent · Defender threat</button>
+    </div>
+    <div class="group" role="group" aria-label="Several at once">
+      <span>SEVERAL</span>
+      <button class="chip" id="three">three at once</button>
+      <button class="chip" id="repeats">three replies (merged)</button>
+    </div>
+    <div class="group" role="group" aria-label="Harv">
+      <span>HARV</span>
+      <button class="chip" id="working" aria-pressed="false">already working</button>
+      <button class="chip" id="motion" aria-pressed="false">motion off</button>
+    </div>
+    <div class="group" role="group" aria-label="Sound">
+      <span>SOUND</span>
+      <button class="chip" data-play="tick">▶ tick</button>
+      <button class="chip" data-play="chime">▶ chime</button>
+    </div>
+    <div class="group">
+      <button class="chip" data-recent>recent</button>
+      <button class="chip" id="clear">clear</button>
+    </div>
+  </div>
+
+  <h2>IN THE APP <span id="appWhere">· Harv's window is in front</span></h2>
+  <div class="panel" id="panel">
+    <div class="apphead">
+      <button class="logo" id="logo" aria-haspopup="true" aria-expanded="false" title="Recent notices">
+        [HARV]<i class="undot" id="logoDot"></i>
+      </button>
+      <div class="models" aria-hidden="true"><span class="on">AUTO</span><span>opus</span><span>sonnet</span><span>haiku</span></div>
+    </div>
+    <div class="bar" aria-hidden="true">
+      <div class="tab">Car radio</div>
+      <div class="tab">Trip plan</div>
+      <div class="tab on">Presence test</div>
+    </div>
+    <div class="stage" id="stage">
+      <canvas id="c" role="img" aria-label="Harv's hammock and face in the chat"></canvas>
+      <div class="log" aria-hidden="true">
+        <div class="you"><b>you ›</b> clean up the stats panel and run the tests</div>
+        <div class="harv"><b>harv ›</b> On it: I'll fold the hardware cards first, then run the web tests.</div>
+        <div class="step" id="lastStep">▸ 3 steps · 12s</div>
+      </div>
+      <div class="bubble" id="bubble" data-level="normal" hidden>
+        <button class="b-line" id="bLine" aria-expanded="false">
+          <span class="b-ic" id="bIc" aria-hidden="true"></span><span class="b-text" id="bText"></span
+          ><span class="b-more" id="bMore" hidden></span><i class="b-fade" id="bFade"></i>
+        </button>
+        <div class="b-detail" id="bDetail" hidden>
+          <p id="bBody"></p>
+          <div class="b-acts" id="bActs"></div>
+        </div>
+      </div>
+    </div>
+    <div class="status"><span class="dot" id="sDot">●</span><span id="sLabel">idle</span><span class="extra" id="sExtra"></span></div>
+    <div class="prompt"><b>harv&gt;</b> ask anything · / for commands</div>
+    <div class="recent" id="appRecent" role="dialog" aria-label="Recent notices" hidden></div>
+  </div>
+  <p class="echo" id="appEcho" aria-live="polite"></p>
+
+  <h2>OUTSIDE THE APP <span id="deskWhere">· Windows desktop, Harv in the background</span></h2>
+  <div class="desk" id="desk">
+    <div class="win">Spotify</div>
+    <div class="win two">Calculator</div>
+    <div class="taskbar"></div>
+    <button class="pill" id="pill" data-mode="rest" data-level="normal" aria-label="Harv: recent notices">
+      <canvas id="pf" width="38" height="38" aria-hidden="true"></canvas>
+      <span class="p-text" id="pText"></span><span class="p-more" id="pMore" hidden></span><i class="p-dot" id="pDot" hidden></i>
+    </button>
+    <div class="recent" id="deskRecent" role="dialog" aria-label="Recent notices" hidden></div>
+    <div class="harvwin" id="harvwin" hidden>
+      <div class="hw-bar"><span>[HARV]</span><button class="x" id="hwClose" aria-label="Close">×</button></div>
+      <div class="hw-body"><b id="hwLine"></b><span id="hwDetail"></span><i id="hwMore"></i></div>
+    </div>
+    <div class="wintoast" id="wintoast" role="alert" hidden>
+      <div class="wt-tag">WINDOWS NOTIFICATION · URGENT ONLY</div>
+      <div class="wt-head"><i></i><span>Harv</span><button class="x" id="wtClose" aria-label="Dismiss">×</button></div>
+      <div class="wt-title" id="wtTitle"></div>
+      <div class="wt-body" id="wtBody"></div>
+    </div>
+  </div>
+  <p class="echo" id="deskEcho" aria-live="polite"></p>
+
+  <h2>SETTINGS › APPEARANCE</h2>
+  <section class="set">
+    <header>
+      <h3>Appearance</h3>
+      <p>How Harv looks and sounds on this computer.</p>
+    </header>
+    <h4>Notifications</h4>
+    <label class="toggle">
+      <input type="checkbox" id="soundOn" checked />
+      <span class="track" aria-hidden="true"></span>
+      <span class="txt">
+        <span>Notification sound</span>
+        <span>A soft tick for notices, a two-note chime for warnings. Silent while a full-screen app is in front.</span>
+      </span>
+    </label>
+    <label class="slider" id="volRow">
+      <span>Volume</span>
+      <input type="range" id="volume" min="0" max="100" step="5" value="60" />
+      <output id="volOut">60%</output>
+    </label>
+    <div class="row">
+      <button class="setbtn" data-play="tick">▶ Tick</button>
+      <button class="setbtn" data-play="chime">▶ Chime</button>
+    </div>
+    <p class="hint">Kept per computer.</p>
+  </section>
+
+  <div class="notes">
+    <div class="note">
+      <h3>THREE LEVELS</h3>
+      <p><b>Normal</b> (a reply in another chat, a scheduled or background task done, a project synced): tick, fades after about 6 s.</p>
+      <p>
+        <b class="amber">Warning</b> (a held yes, a question or plan waiting, usage at 75/90%, a busy program, an error, a sync conflict):
+        chime, amber, stays until clicked.
+      </p>
+      <p>
+        <b class="amber">Urgent</b> (a threat, protection off, overheating, plan limit reached): chime, stronger amber, stays, plus a
+        Windows notification and a phone push after 10 minutes away.
+      </p>
+    </div>
+    <div class="note">
+      <h3>SEVERAL AT ONCE</h3>
+      <p>
+        One bubble, one line. The rest wait behind it, urgent first, with "+2" on the bubble. The same thing again is merged into its line
+        ("replied ×3") and makes no second sound. If Harv is already working, the bubble hangs from the face that's already there.
+      </p>
+    </div>
+    <div class="note">
+      <h3>RECENT</h3>
+      <p>
+        Today's notices, newest first, behind the [HARV] logo and behind the pill's face. What arrived while you were out of the app is
+        marked, with the count as the top line. The phone's pairing code stays a card: it's a code to read and type.
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+  (() => {
+    const C = { accent: '#a8c8e8', warn: '#f2b880', ink: '#dce8f5' };
+    const $ = (id) => document.getElementById(id);
+    const ease = (from, to, rate, dt) => from + (to - from) * Math.min(1, dt * rate);
+    const rgba = (hex, a) => {
+      const n = parseInt(hex.slice(1), 16);
+      return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`;
+    };
+    const SAY_MS = 6000;
+
+    // ================= Sound: two code-made sounds, no files =================
+    // Each is one function of (AudioContext, output node, start time), ready to lift into the app.
+
+    /** Normal notices: a soft short tick. A sine that falls from C6 to G5 in 50 ms and is gone in 90 ms. */
+    function playTick(ctx, out, at = ctx.currentTime) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1046.5, at);
+      osc.frequency.exponentialRampToValueAtTime(784, at + 0.05);
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.linearRampToValueAtTime(0.5, at + 0.004);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.09);
+      osc.connect(gain).connect(out);
+      osc.start(at);
+      osc.stop(at + 0.11);
+    }
+
+    /** Warnings and urgent notices: a gentle two-note chime, D5 then A5 (a rising fifth), 160 ms apart. */
+    function playChime(ctx, out, at = ctx.currentTime) {
+      const NOTES = [
+        [587.33, 0],
+        [880, 0.16],
+      ];
+      for (const [freq, delay] of NOTES) {
+        const t = at + delay;
+        // A sine body, plus a quiet triangle an octave up for a little glass.
+        for (const [type, f, peak] of [
+          ['sine', freq, 0.4],
+          ['triangle', freq * 2, 0.06],
+        ]) {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = type;
+          osc.frequency.setValueAtTime(f, t);
+          gain.gain.setValueAtTime(0.0001, t);
+          gain.gain.linearRampToValueAtTime(peak, t + 0.012);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.7);
+          osc.connect(gain).connect(out);
+          osc.start(t);
+          osc.stop(t + 0.75);
+        }
+      }
+    }
+
+    /** The setting: on/off and volume (0–100). The master gain is volume × 0.5, so 100% is still quiet. */
+    const MASTER = 0.5;
+    const sound = { on: true, volume: 60, ctx: null, out: null };
+    function playSound(kind) {
+      if (!sound.on || sound.volume === 0) return false;
+      if (!sound.ctx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return false;
+        sound.ctx = new AC();
+        sound.out = sound.ctx.createGain();
+        sound.out.connect(sound.ctx.destination);
+      }
+      if (sound.ctx.state === 'suspended') sound.ctx.resume();
+      sound.out.gain.value = MASTER * (sound.volume / 100);
+      (kind === 'tick' ? playTick : playChime)(sound.ctx, sound.out, sound.ctx.currentTime + 0.02);
+      return true;
+    }
+    const soundFor = (level) => (level === 'normal' ? 'tick' : 'chime');
+
+    // ================= The notices (today's real texts where there is one) =================
+    const OPEN = (chat) => [`would open the chat “${chat}”`];
+    const N = {
+      reply: (chat = 'Car radio') => ({ key: 'reply', level: 'normal', icon: '↩', line: `replied in ${chat}`, chats: [chat] }),
+      task: () => ({
+        key: 'schedule:brief',
+        level: 'normal',
+        icon: '⏰',
+        line: '“Morning brief” is done',
+        detail: 'The scheduled task ran in its chat.',
+        actions: [['Open the chat', 'would open the chat “Morning brief”'], ['Dismiss']],
+      }),
+      sync: () => ({
+        key: 'project:pull',
+        level: 'normal',
+        icon: '⇅',
+        line: 'Pulled the project Car radio from the notebook',
+        detail: 'Project sync brought in 3 commits from the other computer.',
+        actions: [['Open the project', 'would open the project chat “Car radio”'], ['Dismiss']],
+      }),
+      usage: (pct = 90) => ({
+        key: 'usage:session',
+        level: 'warning',
+        icon: '◔',
+        line: `Plan at ${pct}% of the session`,
+        detail: `Heads up: ${pct}% of your Claude session (5-hour) limit is used. It resets at 18:40.`,
+        actions: [['Show plan usage', 'would open the stats panel on plan usage'], ['OK']],
+      }),
+      held: () => ({
+        key: 'held:steam',
+        level: 'warning',
+        icon: '!',
+        line: 'Waiting for your yes: uninstall Steam',
+        detail: 'In “Tidy the PC” Harv finished the rest and holds one step: #1 Uninstall Steam. Reply yes or no in that chat.',
+        actions: [
+          ['Open the chat', 'would open the chat “Tidy the PC” at the held step'],
+          ['Later', 'left waiting: it stays in Recent and in its chat'],
+        ],
+      }),
+      hog: () => ({
+        key: 'watchdog:hog:updater.exe',
+        level: 'warning',
+        icon: '◉',
+        line: 'updater.exe is working hard in the background',
+        detail: 'It has used about 92% of your CPU for 10 minutes, with no window open.',
+        actions: [
+          ['Ask Harv', 'would open a new chat asking Harv what updater.exe is and whether to do something'],
+          ['Ignore this app', 'would stop warning about updater.exe (Settings › Watchdog)'],
+          ['OK'],
+        ],
+      }),
+      threat: () => ({
+        key: 'watchdog:threat',
+        level: 'urgent',
+        icon: '▲',
+        line: 'Defender found a threat',
+        title: 'Windows Defender found a threat',
+        detail: 'Windows Defender found Trojan:Win32/Wacatac.B!ml. In C:\\Users\\you\\Downloads\\setup.exe. It was blocked.',
+        actions: [['Ask Harv', 'would open a new chat asking Harv what this is and what to do'], ['OK']],
+      }),
+    };
+    const RANK = { urgent: 2, warning: 1, normal: 0 };
+    const lineOf = (n) => (n.key === 'reply' && n.count > 1 ? `replied ×${n.count}` : n.line);
+    function detailOf(n) {
+      if (n.key !== 'reply') return n.detail;
+      return n.count > 1
+        ? `Harv finished ${n.count} replies: ${n.chats.join(', ')}.`
+        : `Harv finished his reply in the chat “${n.chats[0]}”.`;
+    }
+    function actionsOf(n) {
+      if (n.key !== 'reply') return n.actions;
+      const open = n.chats.length > 1 ? n.chats.map((c) => [`Open “${c}”`, ...OPEN(c)]) : [['Open the chat', ...OPEN(n.chats[0])]];
+      return [...open, ['Dismiss']];
+    }
+
+    // A queue: urgent first, then warnings, then normal ones, oldest first; the same thing again is merged.
+    let seq = 0;
+    function push(queue, n) {
+      const hit = queue.find((i) => i.key === n.key);
+      if (hit) {
+        hit.count += 1;
+        if (n.chats) hit.chats.push(...n.chats);
+        return { item: hit, merged: true };
+      }
+      const item = { ...n, chats: n.chats && [...n.chats], count: 1, id: ++seq };
+      queue.push(item);
+      queue.sort((a, b) => RANK[b.level] - RANK[a.level] || a.id - b.id);
+      return { item, merged: false };
+    }
+
+    // ================= State =================
+    const s = {
+      t: 0,
+      last: performance.now(),
+      ext: 0,
+      extV: 0,
+      D: 0,
+      overChat: false,
+      chatShow: 1,
+      flash: 0,
+      linger: 0,
+      blink: 0,
+      nextBlink: 2,
+      look: { x: 0, y: 0 },
+      focus: null,
+      focusUntil: 0,
+      pulses: [],
+      glow: {},
+    };
+    let motionOff = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let working = false;
+    let where = 'app';
+    const app = { queue: [], open: false, timer: 0 };
+    const desk = { queue: [], say: false, timer: 0, toastTimer: 0 };
+    // Recent: today's notices, newest first. Three arrived while the user was away.
+    const MIN = 60_000;
+    const now0 = Date.now();
+    let recent = [
+      { at: now0 - 14 * MIN, n: N.reply('Trip plan'), away: true },
+      { at: now0 - 31 * MIN, n: N.task(), away: true },
+      { at: now0 - 52 * MIN, n: N.usage(75), away: true },
+      { at: now0 - 190 * MIN, n: N.sync(), away: false },
+      { at: now0 - 305 * MIN, n: N.reply('Car radio'), away: false },
+    ];
+    const awayCount = () => recent.filter((r) => r.away).length;
+
+    const MOONS = [
+      { id: 'memory', label: 'memory', a: -2.6 },
+      { id: 'files', label: 'files', a: -1.6 },
+      { id: 'shell', label: 'shell', a: -0.55 },
+      { id: 'web', label: 'web', a: 0.55 },
+      { id: 'agents', label: 'helpers', a: 1.6 },
+      { id: 'desktop', label: 'desktop', a: 2.6 },
+    ];
+    for (const m of MOONS) s.glow[m.id] = 0;
+
+    // ================= Drawing (from presence-mockup.html) =================
+    function setup(canvas) {
+      const ctx = canvas.getContext('2d');
+      const box = canvas.parentElement;
+      const o = { ctx, box, W: 0, H: 0 };
+      const fit = () => {
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        o.W = box.clientWidth;
+        o.H = box.clientHeight;
+        canvas.width = o.W * dpr;
+        canvas.height = o.H * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      };
+      new ResizeObserver(fit).observe(box);
+      fit();
+      return o;
+    }
+    const chat = setup($('c'));
+    const pf = $('pf');
+    const pfCtx = pf.getContext('2d');
+    {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      pf.width = 38 * dpr;
+      pf.height = 38 * dpr;
+      pfCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    /** Harv's face: a glass core with two eyes of light. `o`: col, look {x,y}, blink, flash, wide (urgent). */
+    function face(ctx, x, y, pr, alpha, o) {
+      const col = o.col;
+      ctx.save();
+      ctx.globalAlpha *= alpha;
+      const pulse = o.wide && !motionOff ? 0.12 + Math.sin(s.t * 3.5) * 0.12 : 0;
+      const halo = ctx.createRadialGradient(x, y, pr * 0.7, x, y, pr * 2.3);
+      halo.addColorStop(0, rgba(col, Math.min(1, 0.22 + o.flash * 0.5 + pulse)));
+      halo.addColorStop(1, rgba(col, 0));
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(x, y, pr * 2.3, 0, 6.29);
+      ctx.fill();
+      // The core: dark glass with a lit rim.
+      const body = ctx.createRadialGradient(x - pr * 0.35, y - pr * 0.4, pr * 0.1, x, y, pr);
+      body.addColorStop(0, '#2a3d50');
+      body.addColorStop(1, '#0c131b');
+      ctx.fillStyle = body;
+      ctx.beginPath();
+      ctx.arc(x, y, pr, 0, 6.29);
+      ctx.fill();
+      ctx.strokeStyle = rgba(col, Math.min(1, 0.55 + o.flash * 0.45 + pulse));
+      ctx.lineWidth = Math.max(1, pr * (o.wide ? 0.09 : 0.06));
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(x, y, pr * 0.82, Math.PI * 1.15, Math.PI * 1.45);
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.lineWidth = Math.max(1, pr * 0.05);
+      ctx.stroke();
+      // Eyes.
+      const open = 1 - o.blink;
+      const w = pr * 0.2;
+      const h = pr * 0.42 * (o.wide ? 1.2 : 1);
+      const ex = o.look.x * pr * 0.36;
+      const ey = o.look.y * pr * 0.24;
+      const gap = pr * 0.27;
+      ctx.fillStyle = rgba(col, 1);
+      ctx.shadowColor = rgba(col, 0.9);
+      ctx.shadowBlur = pr * 0.4;
+      for (const side of [-1, 1]) {
+        const cx = x + side * gap + ex;
+        const cy = y + ey - pr * 0.04;
+        const hh = Math.max(pr * 0.04, h * open);
+        ctx.beginPath();
+        ctx.roundRect(cx - w / 2, cy - hh / 2, w, hh, w / 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    const TILT = -0.16;
+    const FLAT = 0.42;
+    function moonPos(m, x, y, R) {
+      const i = MOONS.indexOf(m);
+      const rad = R * (0.5 + i * 0.064);
+      const a = m.a + s.t * (0.5 - i * 0.055) * (working ? 1.2 : 0.5) * (motionOff ? 0 : 1);
+      const dx = Math.cos(a) * rad;
+      const dy = Math.sin(a) * rad * FLAT;
+      return {
+        x: x + dx * Math.cos(TILT) - dy * Math.sin(TILT),
+        y: y + dx * Math.sin(TILT) + dy * Math.cos(TILT),
+        front: Math.sin(a) > 0,
+        depth: (Math.sin(a) + 1) / 2,
+      };
+    }
+    function orbits(ctx, x, y, R, alpha) {
+      MOONS.forEach((m, i) => {
+        const rad = R * (0.5 + i * 0.064);
+        ctx.beginPath();
+        ctx.ellipse(x, y, rad, rad * FLAT, TILT, 0, 6.29);
+        ctx.strokeStyle = rgba(C.ink, (s.focus === m.id ? 0.2 : 0.07) * alpha);
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      });
+    }
+    function moons(ctx, x, y, R, alpha, front, col) {
+      for (const m of MOONS) {
+        const p = moonPos(m, x, y, R);
+        if (p.front !== front) continue;
+        const g = s.glow[m.id];
+        const a2 = alpha * (0.5 + p.depth * 0.5);
+        const size = 2.6 + p.depth * 1.6 + g * 2.5;
+        if (g > 0.02) {
+          const gl = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, size * 4);
+          gl.addColorStop(0, rgba(col, 0.6 * g * alpha));
+          gl.addColorStop(1, rgba(col, 0));
+          ctx.fillStyle = gl;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, size * 4, 0, 6.29);
+          ctx.fill();
+        }
+        const sph = ctx.createRadialGradient(p.x - size * 0.35, p.y - size * 0.4, size * 0.1, p.x, p.y, size);
+        sph.addColorStop(0, rgba('#ffffff', (0.55 + g * 0.45) * a2));
+        sph.addColorStop(1, rgba(g > 0.05 ? '#ffffff' : col, (0.45 + g * 0.5) * a2));
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, size, 0, 6.29);
+        ctx.fillStyle = sph;
+        ctx.fill();
+        if (g > 0.25 || s.focus === m.id) {
+          ctx.font = '10px IBM Plex Mono, monospace';
+          ctx.fillStyle = rgba(C.ink, Math.max(g, s.focus === m.id ? 0.75 : 0) * alpha);
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillText(m.label, p.x, p.y + size + 3);
+        }
+      }
+    }
+    function pulses(ctx, x, y, R, alpha, col) {
+      for (const p of s.pulses) {
+        const end = moonPos(
+          MOONS.find((q) => q.id === p.to),
+          x,
+          y,
+          R,
+        );
+        const e = 1 - Math.pow(1 - Math.min(1, p.k), 3);
+        const px = x + (end.x - x) * e;
+        const py = y + (end.y - y) * e - Math.sin(e * Math.PI) * 8;
+        const tail = ctx.createRadialGradient(px, py, 0, px, py, 9);
+        tail.addColorStop(0, rgba(col, 0.6 * alpha));
+        tail.addColorStop(1, rgba(col, 0));
+        ctx.fillStyle = tail;
+        ctx.beginPath();
+        ctx.arc(px, py, 9, 0, 6.29);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(px, py, 2.4, 0, 6.29);
+        ctx.fillStyle = rgba('#ffffff', 0.95 * alpha);
+        ctx.fill();
+      }
+    }
+
+    const tintOf = (head) => (head && head.level !== 'normal' ? C.warn : C.accent);
+
+    /** The chat: the glass hammock from the top edge, Harv's face in its bottom. */
+    function drawChat(head) {
+      const { ctx, W, H } = chat;
+      ctx.clearRect(0, 0, W, H);
+      s.D = 0;
+      const show = s.chatShow;
+      if (show < 0.01) return;
+      const col = tintOf(head);
+      const urgent = head?.level === 'urgent';
+      const big = Math.max(56, Math.min(84, W * 0.07));
+      const e = s.ext;
+      const cx = W / 2;
+      const rest = 1 - Math.min(1, e * 4);
+      if (rest > 0) {
+        const b = motionOff ? 0.6 : 0.45 + Math.sin(s.t * 1.2) * 0.2;
+        const gl = ctx.createLinearGradient(cx - 70, 0, cx + 70, 0);
+        gl.addColorStop(0, rgba(col, 0));
+        gl.addColorStop(0.5, rgba(col, b * rest * show));
+        gl.addColorStop(1, rgba(col, 0));
+        ctx.fillStyle = gl;
+        ctx.fillRect(cx - 70, 0, 140, 1.5);
+      }
+      if (e < 0.03) return;
+      const R = big * e;
+      const wob = motionOff ? 0 : (Math.sin(s.t * 1.7) * 1.6 + Math.sin(s.t * 0.9)) * e;
+      const D = R * 1.5 + wob;
+      const cy = D - R * 0.66;
+      const sway = motionOff ? 0 : Math.sin(s.t * 1.1) * 0.03;
+      const half = Math.max(R * 3.6, W * 0.3 * e) * (1 + sway);
+      s.D = D;
+      ctx.save();
+      ctx.globalAlpha = show;
+      ctx.translate(0, -(1 - show) * (D + 10));
+      const path = () => {
+        ctx.beginPath();
+        ctx.moveTo(cx - half, 0);
+        ctx.bezierCurveTo(cx - half * 0.58, 0, cx - half * (0.34 + sway), D, cx, D);
+        ctx.bezierCurveTo(cx + half * (0.34 - sway), D, cx + half * 0.58, 0, cx + half, 0);
+      };
+      path();
+      const fill = ctx.createLinearGradient(0, 0, 0, D);
+      fill.addColorStop(0, 'rgba(16,24,34,0.3)');
+      fill.addColorStop(1, 'rgba(16,24,34,0.75)');
+      ctx.fillStyle = fill;
+      ctx.fill();
+      path();
+      // An urgent notice lights the hammock's edge amber too.
+      ctx.strokeStyle = urgent ? rgba(C.warn, 0.6) : head && head.level === 'warning' ? rgba(C.warn, 0.3) : rgba(C.ink, 0.22);
+      ctx.lineWidth = urgent ? 1.5 : 1;
+      ctx.stroke();
+
+      const inner = Math.min(1, Math.max(0, (e - 0.55) / 0.45));
+      if (inner > 0) {
+        // With something to say he looks down at his bubble; while working, at the moon in use.
+        let want = { x: 0, y: 0 };
+        const fm = !head && s.focus && MOONS.find((m) => m.id === s.focus);
+        if (head) want = { x: 0, y: 1 };
+        else if (fm) {
+          const p = moonPos(fm, cx, cy, R);
+          want = { x: Math.max(-1, Math.min(1, (p.x - cx) / (R * 0.6))), y: Math.max(-1, Math.min(1, (p.y - cy) / (R * 0.35))) };
+        }
+        if (motionOff) s.look = want;
+        else {
+          s.look.x = ease(s.look.x, want.x, 6, 1 / 60);
+          s.look.y = ease(s.look.y, want.y, 6, 1 / 60);
+        }
+        // The moons are his tools: bright while he works, faint when he only came down to say something.
+        const mAlpha = inner * (working ? 1 : 0.35);
+        ctx.save();
+        path();
+        ctx.closePath();
+        ctx.clip();
+        orbits(ctx, cx, cy, R, mAlpha);
+        moons(ctx, cx, cy, R, mAlpha, false, col);
+        face(ctx, cx, cy, R * 0.32, inner, { col, look: s.look, blink: s.blink, flash: s.flash, wide: urgent });
+        moons(ctx, cx, cy, R, mAlpha, true, col);
+        pulses(ctx, cx, cy, R, mAlpha, col);
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+
+    /** The pill's face: he looks at the line he is saying. */
+    function drawPillFace() {
+      pfCtx.clearRect(0, 0, 38, 38);
+      const head = desk.queue[0];
+      face(pfCtx, 19, 19, 13.5, 1, {
+        col: tintOf(head),
+        look: { x: desk.say ? 0.7 : 0, y: 0 },
+        blink: s.blink,
+        flash: 0,
+        wide: head?.level === 'urgent',
+      });
+    }
+
+    // ================= The app: the bubble =================
+    const bubble = $('bubble');
+    const bLine = $('bLine');
+    const bFade = $('bFade');
+    function renderApp() {
+      const head = app.queue[0];
+      clearTimeout(app.timer);
+      bFade.classList.remove('run');
+      if (!head) {
+        bubble.hidden = true;
+        app.open = false;
+        updateStatus();
+        return;
+      }
+      bubble.hidden = false;
+      bubble.dataset.level = head.level;
+      bubble.classList.toggle('open', app.open);
+      bLine.setAttribute('aria-expanded', String(app.open));
+      $('bIc').textContent = head.icon;
+      $('bText').textContent = lineOf(head);
+      const more = app.queue.length - 1;
+      $('bMore').hidden = more === 0;
+      $('bMore').textContent = `+${more}`;
+      $('bMore').title = `${more} more waiting`;
+      $('bDetail').hidden = !app.open;
+      if (app.open) {
+        $('bBody').textContent = detailOf(head);
+        const acts = $('bActs');
+        acts.replaceChildren();
+        actionsOf(head).forEach(([label, does], i) => {
+          const b = document.createElement('button');
+          b.className = i === 0 && does ? 'act' : 'act quiet';
+          b.textContent = label;
+          b.addEventListener('click', () => {
+            echo('app', does ? `→ ${label}: ${does}.` : `→ ${label}: the notice is closed; it stays in Recent.`);
+            dismissApp(head);
+          });
+          acts.append(b);
+        });
+      }
+      // A normal notice goes by itself after ~6 s, unless its detail is open.
+      if (head.level === 'normal' && !app.open) {
+        void bFade.offsetWidth;
+        bFade.classList.add('run');
+        app.timer = setTimeout(() => dismissApp(head), SAY_MS);
+      }
+      updateStatus();
+    }
+    function dismissApp(item) {
+      app.queue = app.queue.filter((i) => i !== item);
+      app.open = false;
+      if (!app.queue.length && !working) s.linger = 0.5;
+      renderApp();
+    }
+    bLine.addEventListener('click', () => {
+      app.open = !app.open;
+      renderApp();
+    });
+    function placeBubble(head) {
+      if (!head) return;
+      const k = motionOff ? 1 : Math.min(1, Math.max(0, (s.ext - 0.55) / 0.45));
+      bubble.style.top = `${Math.round(s.D + 12)}px`;
+      bubble.style.opacity = k;
+      bubble.style.pointerEvents = k < 0.5 ? 'none' : '';
+    }
+    function updateStatus() {
+      $('sDot').textContent = working ? '✻' : '●';
+      $('sLabel').textContent = working ? 'working · running the tests' : 'idle';
+      $('sLabel').style.color = working ? C.accent : '';
+      $('sExtra').textContent = working ? '(12s · ↓ 340 tokens · esc to stop)' : '';
+    }
+
+    // ================= Outside the app: the pill, the Windows toast, Harv's window =================
+    const pill = $('pill');
+    function renderDesk() {
+      const head = desk.queue[0];
+      const unseen = desk.queue.length;
+      const mode = head && desk.say ? 'say' : working ? 'work' : unseen ? 'face' : 'rest';
+      pill.dataset.mode = mode;
+      pill.dataset.level = head ? head.level : 'normal';
+      $('pText').textContent = mode === 'say' ? lineOf(head) : mode === 'work' ? 'working · running the tests' : '';
+      $('pMore').hidden = !(mode === 'say' && unseen > 1);
+      $('pMore').textContent = `+${unseen - 1}`;
+      $('pDot').hidden = !(unseen && mode !== 'say');
+      pill.setAttribute(
+        'aria-label',
+        unseen ? `Harv: ${lineOf(head)}${unseen > 1 ? `, and ${unseen - 1} more` : ''}. Open Harv on it.` : 'Harv: recent notices',
+      );
+    }
+    function deskSay(item) {
+      desk.say = true;
+      clearTimeout(desk.timer);
+      // The line for ~6 s (every level), then the face with a dot until it's seen.
+      desk.timer = setTimeout(() => {
+        desk.say = false;
+        renderDesk();
+        echo('desk', '→ The line is gone; his face keeps a dot until you click it.');
+      }, SAY_MS);
+      $('harvwin').hidden = true;
+      if (item.level === 'urgent') showToast(item);
+      renderDesk();
+    }
+    function showToast(item) {
+      $('wtTitle').textContent = item.title || item.line;
+      $('wtBody').textContent = detailOf(item);
+      $('wintoast').hidden = false;
+      clearTimeout(desk.toastTimer);
+      desk.toastTimer = setTimeout(() => ($('wintoast').hidden = true), 9000);
+    }
+    $('wtClose').addEventListener('click', () => ($('wintoast').hidden = true));
+    /** A click on the pill: Harv's window comes up on that notice; the rest wait in his bubble there. */
+    function bringUp(item, rest) {
+      $('hwLine').textContent = lineOf(item);
+      $('hwLine').className = item.level === 'normal' ? '' : 'amber';
+      $('hwDetail').textContent = detailOf(item);
+      $('hwMore').textContent = rest ? `+${rest} more wait in his bubble, most urgent first.` : '';
+      $('harvwin').hidden = false;
+      $('wintoast').hidden = true;
+      closeRecent();
+      echo('desk', `→ Harv's window comes to the front on “${lineOf(item)}”, its detail open.`);
+    }
+    pill.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const head = desk.queue[0];
+      if (!head) return toggleRecent('desk');
+      const rest = desk.queue.length - 1;
+      clearTimeout(desk.timer);
+      desk.queue = [];
+      desk.say = false;
+      for (const r of recent) r.away = false;
+      bringUp(head, rest);
+      renderDesk();
+      updateDots();
+    });
+    $('hwClose').addEventListener('click', () => ($('harvwin').hidden = true));
+
+    // ================= Recent =================
+    const time = (at) => new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    let recentOpen = null;
+    function renderRecent(el, side) {
+      el.replaceChildren();
+      const head = document.createElement('div');
+      head.className = 'r-head';
+      head.textContent = 'RECENT · TODAY';
+      el.append(head);
+      const away = awayCount();
+      if (away) {
+        const top = document.createElement('div');
+        top.className = 'r-away';
+        top.textContent = `${away} notice${away === 1 ? '' : 's'} while you were away`;
+        el.append(top);
+      }
+      for (const r of recent) {
+        const row = document.createElement('button');
+        row.className = r.away ? 'r-row away' : 'r-row';
+        row.dataset.level = r.n.level;
+        const t = document.createElement('time');
+        t.textContent = time(r.at);
+        const text = document.createElement('span');
+        text.textContent = r.n.line;
+        row.append(t, text);
+        row.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const item = { ...r.n, count: 1, id: ++seq };
+          closeRecent();
+          if (side === 'app') {
+            // Its detail opens in the bubble again.
+            app.queue = [item, ...app.queue.filter((i) => i.key !== item.key)];
+            app.open = true;
+            renderApp();
+          } else bringUp(item, 0);
+        });
+        el.append(row);
+      }
+    }
+    function toggleRecent(side) {
+      const was = recentOpen;
+      closeRecent();
+      if (was === side) return;
+      const el = $(side === 'app' ? 'appRecent' : 'deskRecent');
+      renderRecent(el, side);
+      el.hidden = false;
+      recentOpen = side;
+      $('logo').setAttribute('aria-expanded', String(side === 'app'));
+      $(side === 'app' ? 'panel' : 'desk').scrollIntoView({ block: 'nearest' });
+    }
+    function closeRecent() {
+      if (!recentOpen) return;
+      $('appRecent').hidden = true;
+      $('deskRecent').hidden = true;
+      $('logo').setAttribute('aria-expanded', 'false');
+      recentOpen = null;
+      // Seen now: "while you were away" is only the top line of the first look.
+      for (const r of recent) r.away = false;
+      updateDots();
+    }
+    function updateDots() {
+      $('logoDot').hidden = awayCount() === 0;
+    }
+    $('logo').addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleRecent('app');
+    });
+    document.addEventListener('click', (e) => {
+      if (recentOpen && !e.target.closest('.recent') && !e.target.closest('[data-recent]')) closeRecent();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if (recentOpen) closeRecent();
+      else if (app.open) {
+        app.open = false;
+        renderApp();
+      }
+    });
+
+    // ================= Sending a notice =================
+    function echo(side, text) {
+      $(side === 'app' ? 'appEcho' : 'deskEcho').textContent = text;
+    }
+    /** One notice arrives. A repeat merged into a waiting line makes no second sound. */
+    function fire(n, { silent = false } = {}) {
+      const queue = where === 'app' ? app.queue : desk.queue;
+      const { item, merged } = push(queue, n);
+      recent.unshift({ at: Date.now(), n, away: where === 'desk' });
+      if (!silent && !merged) playSound(soundFor(n.level));
+      if (where === 'app') renderApp();
+      else deskSay(item);
+      updateDots();
+      return item;
+    }
+    function reveal() {
+      $(where === 'app' ? 'panel' : 'desk').scrollIntoView({ block: 'nearest', behavior: motionOff ? 'auto' : 'smooth' });
+    }
+    const HINT = {
+      normal: ['→ A normal notice: a tick, gone after about 6 s. Click the bubble for its detail.', '→ The pill says it for about 6 s.'],
+      warning: ['→ A warning: a chime, amber, stays until you click it.', '→ The pill says it for about 6 s, amber.'],
+      urgent: [
+        '→ Urgent: a chime, stronger amber, stays until you click it.',
+        '→ Urgent: the pill says it, and Windows shows a notification too (bottom right).',
+      ],
+    };
+    document.querySelectorAll('[data-fire]').forEach((b) =>
+      b.addEventListener('click', () => {
+        const n = N[b.dataset.fire]();
+        fire(n);
+        echo(where, HINT[n.level][where === 'app' ? 0 : 1]);
+        reveal();
+      }),
+    );
+    $('three').addEventListener('click', () => {
+      // They arrive together, in this order; the most urgent one is said first and only its sound plays.
+      for (const n of [N.reply(), N.usage(), N.threat()]) fire(n, { silent: true });
+      playSound('chime');
+      echo(where, where === 'app' ? '→ Three at once: urgent first, “+2” on the bubble. Close one to see the next.' : '→ Three at once: the pill says the urgent one, “+2” wait behind it.');
+      reveal();
+    });
+    let burst = [];
+    $('repeats').addEventListener('click', () => {
+      burst.forEach(clearTimeout);
+      const chats = ['Car radio', 'Trip plan', 'Presence test'];
+      burst = chats.map((c, i) => setTimeout(() => fire(N.reply(c)), i * 900));
+      echo(where, '→ Three replies, one line: “replied ×3”. Only the first ticks.');
+      reveal();
+    });
+    $('clear').addEventListener('click', () => {
+      burst.forEach(clearTimeout);
+      clearTimeout(desk.timer);
+      app.queue = [];
+      desk.queue = [];
+      desk.say = false;
+      $('harvwin').hidden = true;
+      $('wintoast').hidden = true;
+      closeRecent();
+      renderApp();
+      renderDesk();
+      echo('app', '');
+      echo('desk', '');
+    });
+    document.querySelectorAll('[data-where]').forEach((b) =>
+      b.addEventListener('click', () => {
+        where = b.dataset.where;
+        document.querySelectorAll('[data-where]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+        $('appWhere').textContent = where === 'app' ? "· Harv's window is in front" : '· not in front right now';
+        $('deskWhere').textContent =
+          where === 'desk' ? '· Windows desktop, Harv in the background: notices arrive here' : '· Windows desktop, Harv in the background';
+      }),
+    );
+    document.querySelector('[data-recent]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleRecent(where);
+    });
+    $('working').addEventListener('click', () => {
+      working = !working;
+      $('working').setAttribute('aria-pressed', String(working));
+      if (!working && !app.queue.length) s.linger = 0.5;
+      renderApp();
+      renderDesk();
+      echo(where, working ? '→ Harv is working: a notice now hangs from the face that is already there.' : '');
+    });
+    function setMotion(off) {
+      motionOff = off;
+      document.body.classList.toggle('still', off);
+      $('motion').setAttribute('aria-pressed', String(off));
+      renderApp();
+    }
+    $('motion').addEventListener('click', () => setMotion(!motionOff));
+
+    // ================= Settings row =================
+    document.querySelectorAll('[data-play]').forEach((b) =>
+      b.addEventListener('click', () => {
+        if (!playSound(b.dataset.play)) echo(where, '→ Notification sound is off (Settings › Appearance), so nothing plays.');
+      }),
+    );
+    $('soundOn').addEventListener('change', (e) => {
+      sound.on = e.target.checked;
+      $('volRow').classList.toggle('off', !sound.on);
+      if (sound.on) playSound('tick');
+    });
+    $('volume').addEventListener('input', (e) => {
+      sound.volume = Number(e.target.value);
+      $('volOut').textContent = `${sound.volume}%`;
+      if (sound.out) sound.out.gain.value = MASTER * (sound.volume / 100);
+    });
+    // Let go of the slider: one tick at the new volume.
+    $('volume').addEventListener('change', () => playSound('tick'));
+
+    // ================= The loop =================
+    // While he works, a moon lights up now and then.
+    setInterval(() => {
+      if (!working || motionOff) return;
+      const m = MOONS[Math.floor(Math.random() * 5)];
+      s.pulses.push({ to: m.id, k: 0 });
+      s.focus = m.id;
+      s.focusUntil = s.t + 2.4;
+    }, 1300);
+
+    function frame(now) {
+      const dt = Math.min(0.05, (now - s.last) / 1000);
+      s.last = now;
+      s.t += dt;
+      s.linger = Math.max(0, s.linger - dt);
+      const head = app.queue[0];
+      const down = working || !!head || s.linger > 0;
+      if (motionOff) {
+        // No drop, no spring: the hammock is simply there or not.
+        s.ext = down ? 1 : 0;
+        s.extV = 0;
+      } else {
+        s.extV += ((down ? 1 : 0) - s.ext) * 38 * dt - s.extV * 7.5 * dt;
+        s.ext = Math.max(0, s.ext + s.extV * dt);
+      }
+      // Mouse near pulls him up, but never while he has something to say.
+      const away = s.overChat && !head;
+      s.chatShow = motionOff ? (away ? 0 : 1) : ease(s.chatShow, away ? 0 : 1, away ? 12 : 5, dt);
+      s.flash = Math.max(0, s.flash - dt * 1.4);
+      s.nextBlink -= dt;
+      if (s.nextBlink <= 0 && !motionOff) {
+        s.blink = 1;
+        s.nextBlink = 2.5 + Math.random() * 3;
+      }
+      s.blink = Math.max(0, s.blink - dt * 7);
+      if (s.focus && (s.t > s.focusUntil || !working)) s.focus = null;
+      for (const id in s.glow) s.glow[id] = Math.max(0, s.glow[id] - dt * 0.8);
+      for (const p of s.pulses) {
+        p.k += dt * 1.5;
+        if (p.k >= 1 && !p.hit) {
+          p.hit = true;
+          s.glow[p.to] = 1;
+        }
+      }
+      s.pulses = s.pulses.filter((p) => p.k < 1.1);
+      drawChat(head);
+      placeBubble(head);
+      drawPillFace();
+      requestAnimationFrame(frame);
+    }
+
+    const panel = $('panel');
+    panel.addEventListener('pointermove', (e) => {
+      const r = chat.box.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const y = e.clientY - r.top;
+      const R = Math.max(56, Math.min(84, chat.W * 0.07)) * Math.max(0.15, s.ext);
+      s.overChat = y > 0 && Math.abs(x - chat.W / 2) < R * 1.8 + 30 && y < R * 2 + 50;
+    });
+    panel.addEventListener('pointerleave', () => (s.overChat = false));
+
+    setMotion(motionOff);
+    renderDesk();
+    updateDots();
+    requestAnimationFrame(frame);
+  })();
+</script>

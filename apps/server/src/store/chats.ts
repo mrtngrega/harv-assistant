@@ -1,0 +1,444 @@
+import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { HISTORY_QUERY_MAX, type ChatSnapshot, type HistoryItem, type LineKind, type Project, type StoredLine } from '@harv/shared';
+
+type LineRow = {
+  kind: LineKind;
+  text: string;
+  tag: string | null;
+  reason: string | null;
+  files: string | null;
+  ref: string | null;
+  created_at: number;
+};
+
+const fromRow = (r: LineRow): StoredLine => ({
+  kind: r.kind,
+  text: r.text,
+  ...(r.tag ? { tag: r.tag } : {}),
+  ...(r.reason ? { reason: r.reason } : {}),
+  ...(r.files ? { files: JSON.parse(r.files) as string[] } : {}),
+  ...(r.ref ? { ref: r.ref } : {}),
+  at: r.created_at,
+});
+
+const SCHEMA = `
+  PRAGMA foreign_keys = ON;
+  PRAGMA journal_mode = WAL;
+  CREATE TABLE IF NOT EXISTS chats (
+    id         TEXT PRIMARY KEY,
+    title      TEXT NOT NULL,
+    session_id TEXT,
+    open       INTEGER NOT NULL DEFAULT 1,
+    context    INTEGER,
+    title_locked INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS lines (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    tag        TEXT,
+    reason     TEXT,
+    files      TEXT,
+    ref        TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS lines_by_chat ON lines(chat_id, id);
+  CREATE TABLE IF NOT EXISTS projects (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    path       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    created_at INTEGER NOT NULL
+  );
+`;
+
+/** Lines kept per chat when restoring a tab (older ones stay in the database). */
+const RESTORE_LINES = 500;
+
+const likePattern = (query: string) => `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+
+/** ~80 characters of `text` around the first match of `query`. */
+export function snippetAround(text: string, query: string): string {
+  const at = text.toLowerCase().indexOf(query.toLowerCase());
+  if (at < 0) return text.slice(0, 80);
+  const start = Math.max(0, at - 30);
+  return `${start > 0 ? '…' : ''}${text.slice(start, start + 80).replace(/\s+/g, ' ')}${start + 80 < text.length ? '…' : ''}`;
+}
+
+/** Chat history in SQLite (Node's built-in driver): one row per chat, one per finished line. */
+type ProjectRow = { id: string; name: string; path: string; remote: string | null };
+const toProject = (r: ProjectRow): Project => ({ id: r.id, name: r.name, path: r.path, ...(r.remote ? { remote: r.remote } : {}) });
+
+export class ChatStore {
+  private db: DatabaseSync;
+
+  constructor(path: string) {
+    this.db = new DatabaseSync(path);
+    this.db.exec(SCHEMA);
+    // Databases from before M4 lack the attachments column.
+    const columns = this.db.prepare('PRAGMA table_info(lines)').all() as { name: string }[];
+    if (!columns.some((c) => c.name === 'files')) this.db.exec('ALTER TABLE lines ADD COLUMN files TEXT');
+    if (!columns.some((c) => c.name === 'ref')) this.db.exec('ALTER TABLE lines ADD COLUMN ref TEXT');
+    if (!columns.some((c) => c.name === 'reason')) this.db.exec('ALTER TABLE lines ADD COLUMN reason TEXT');
+    const chatColumns = this.db.prepare('PRAGMA table_info(chats)').all() as { name: string }[];
+    if (!chatColumns.some((c) => c.name === 'context')) this.db.exec('ALTER TABLE chats ADD COLUMN context INTEGER');
+    if (!chatColumns.some((c) => c.name === 'title_locked')) {
+      this.db.exec('ALTER TABLE chats ADD COLUMN title_locked INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!chatColumns.some((c) => c.name === 'project_id')) this.db.exec('ALTER TABLE chats ADD COLUMN project_id TEXT');
+    // Sync (M10b): a line id both devices share, when a chat's name or project last changed, whether its
+    // Claude session missed lines from the other device, and a project known there only by name.
+    if (!columns.some((c) => c.name === 'uid')) this.db.exec('ALTER TABLE lines ADD COLUMN uid TEXT');
+    if (!chatColumns.some((c) => c.name === 'meta_at')) this.db.exec('ALTER TABLE chats ADD COLUMN meta_at INTEGER NOT NULL DEFAULT 0');
+    if (!chatColumns.some((c) => c.name === 'stale')) this.db.exec('ALTER TABLE chats ADD COLUMN stale INTEGER NOT NULL DEFAULT 0');
+    if (!chatColumns.some((c) => c.name === 'project_name')) this.db.exec('ALTER TABLE chats ADD COLUMN project_name TEXT');
+    // A project's GitHub repo (docs/PLAN.md §6f).
+    const projectColumns = this.db.prepare('PRAGMA table_info(projects)').all() as { name: string }[];
+    if (!projectColumns.some((c) => c.name === 'remote')) this.db.exec('ALTER TABLE projects ADD COLUMN remote TEXT');
+    // Rewind (docs/PLAN.md §6s C3): where each of the user's messages sits in its Claude conversation.
+    if (!columns.some((c) => c.name === 'msg_uuid')) {
+      this.db.exec('ALTER TABLE lines ADD COLUMN msg_uuid TEXT');
+      this.db.exec('ALTER TABLE lines ADD COLUMN fork_at TEXT');
+      this.db.exec('ALTER TABLE lines ADD COLUMN msg_session TEXT');
+    }
+    if (!chatColumns.some((c) => c.name === 'chain_end')) this.db.exec('ALTER TABLE chats ADD COLUMN chain_end TEXT');
+    // Chat summaries (docs/PLAN.md §6c): one line every other chat sees.
+    if (!chatColumns.some((c) => c.name === 'summary')) this.db.exec('ALTER TABLE chats ADD COLUMN summary TEXT');
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS lines_by_uid ON lines(uid)');
+    const missing = this.db.prepare('SELECT id FROM lines WHERE uid IS NULL').all() as { id: number }[];
+    if (missing.length) {
+      const set = this.db.prepare('UPDATE lines SET uid = ? WHERE id = ?');
+      this.db.exec('BEGIN');
+      for (const { id } of missing) set.run(randomUUID(), id);
+      this.db.exec('COMMIT');
+    }
+  }
+
+  /** The chat's name or project changed here. */
+  private touchMeta(id: string) {
+    this.db.prepare('UPDATE chats SET meta_at = ? WHERE id = ?').run(Date.now(), id);
+  }
+
+  // ── Projects (project mode) ──
+
+  projects(): Project[] {
+    const rows = this.db
+      .prepare('SELECT id, name, path, remote FROM projects ORDER BY name COLLATE NOCASE')
+      .all() as unknown as ProjectRow[];
+    return rows.map(toProject);
+  }
+
+  project(id: string | null | undefined): Project | undefined {
+    if (!id) return undefined;
+    const row = this.db.prepare('SELECT id, name, path, remote FROM projects WHERE id = ?').get(id) as ProjectRow | undefined;
+    return row && toProject(row);
+  }
+
+  /** A project's GitHub repo; telling the other devices about it (unless it came from them). */
+  setProjectRemote(id: string, remote: string): void {
+    const project = this.project(id);
+    if (!project || project.remote === remote) return;
+    this.db.prepare('UPDATE projects SET remote = ? WHERE id = ?').run(remote, id);
+  }
+
+  /** The project for a folder, adding it if it's new. */
+  addProject(name: string, path: string): Project {
+    const existing = this.db.prepare('SELECT id, name, path, remote FROM projects WHERE path = ?').get(path) as ProjectRow | undefined;
+    if (existing) return toProject(existing);
+    const project = { id: randomUUID(), name, path };
+    this.db.prepare('INSERT INTO projects (id, name, path, created_at) VALUES (?, ?, ?, ?)').run(project.id, name, path, Date.now());
+    // Chats from the other device that work on a project of this name join it.
+    this.db
+      .prepare('UPDATE chats SET project_id = ?, project_name = NULL WHERE project_id IS NULL AND lower(project_name) = lower(?)')
+      .run(project.id, name);
+    return project;
+  }
+
+  /** Forgets a project; its chats go back to plain assistant chats (the folder isn't touched). */
+  removeProject(id: string): void {
+    // They remember the name, so adding the project again brings them back.
+    this.db
+      .prepare('UPDATE chats SET project_id = NULL, project_name = (SELECT name FROM projects WHERE id = ?) WHERE project_id = ?')
+      .run(id, id);
+    this.db.prepare('DELETE FROM projects WHERE id = ?').run(id);
+  }
+
+  setProject(chatId: string, projectId: string | null): void {
+    this.db.prepare('UPDATE chats SET project_id = ?, project_name = NULL WHERE id = ?').run(projectId, chatId);
+    this.touchMeta(chatId);
+  }
+
+  /** The project a chat works on, if any. */
+  projectOf(chatId: string): Project | undefined {
+    const row = this.db.prepare('SELECT project_id FROM chats WHERE id = ?').get(chatId) as { project_id: string | null } | undefined;
+    return this.project(row?.project_id);
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  ensureChat(id: string, title: string): void {
+    const now = Date.now();
+    this.db
+      .prepare('INSERT OR IGNORE INTO chats (id, title, created_at, updated_at, meta_at) VALUES (?, ?, ?, ?, ?)')
+      .run(id, title, now, now, now);
+  }
+
+  title(id: string): string | undefined {
+    return (this.db.prepare('SELECT title FROM chats WHERE id = ?').get(id) as { title: string } | undefined)?.title;
+  }
+
+  /** `byUser` locks the title: automatic naming never changes it after that. */
+  setTitle(id: string, title: string, byUser = false): void {
+    this.db.prepare('UPDATE chats SET title = ?, title_locked = MAX(title_locked, ?) WHERE id = ?').run(title, byUser ? 1 : 0, id);
+    this.touchMeta(id);
+  }
+
+  /** One line on what the chat is about (§6c), for every other chat; synced like the name. */
+  summary(id: string): string | undefined {
+    const row = this.db.prepare('SELECT summary FROM chats WHERE id = ?').get(id) as { summary: string | null } | undefined;
+    return row?.summary ?? undefined;
+  }
+
+  setSummary(id: string, summary: string): void {
+    if (!this.exists(id) || this.summary(id) === summary) return;
+    this.db.prepare('UPDATE chats SET summary = ? WHERE id = ?').run(summary, id);
+    this.touchMeta(id);
+  }
+
+  /** The user named this chat themselves. */
+  titleLocked(id: string): boolean {
+    return (
+      (this.db.prepare('SELECT title_locked FROM chats WHERE id = ?').get(id) as { title_locked: number } | undefined)?.title_locked === 1
+    );
+  }
+
+  setOpen(id: string, open: boolean): void {
+    this.db.prepare('UPDATE chats SET open = ? WHERE id = ?').run(open ? 1 : 0, id);
+  }
+
+  setSession(id: string, sessionId: string | null): void {
+    this.db.prepare('UPDATE chats SET session_id = ? WHERE id = ?').run(sessionId, id);
+    if (!sessionId) this.db.prepare('UPDATE chats SET chain_end = NULL WHERE id = ?').run(id);
+    // A new session's first message was marked before Claude named the session.
+    else
+      this.db
+        .prepare('UPDATE lines SET msg_session = ? WHERE chat_id = ? AND msg_uuid IS NOT NULL AND msg_session IS NULL')
+        .run(sessionId, id);
+  }
+
+  /** The last entry of a chat's Claude conversation (where its next message starts). */
+  chainEnd(id: string): string | undefined {
+    const row = this.db.prepare('SELECT chain_end FROM chats WHERE id = ?').get(id) as { chain_end: string | null } | undefined;
+    return row?.chain_end ?? undefined;
+  }
+
+  setChainEnd(id: string, uuid: string): void {
+    this.db.prepare('UPDATE chats SET chain_end = ? WHERE id = ?').run(uuid, id);
+  }
+
+  /** The user's newest message went to Claude: where it sits in the conversation, for a rewind. */
+  markTurn(chatId: string, mark: { uuid: string; forkAt?: string }): void {
+    this.db
+      .prepare(
+        `UPDATE lines SET msg_uuid = ?, fork_at = ?, msg_session = (SELECT session_id FROM chats WHERE id = ?)
+         WHERE id = (SELECT id FROM lines WHERE chat_id = ? AND kind = 'you' ORDER BY id DESC LIMIT 1) AND msg_uuid IS NULL`,
+      )
+      .run(mark.uuid, mark.forkAt ?? null, chatId, chatId);
+  }
+
+  /** One of the user's messages, counted from the end (0 = the newest), with its place in the conversation. */
+  rewindTarget(chatId: string, fromEnd: number) {
+    const row = this.db
+      .prepare(
+        `SELECT id, uid, text, files, msg_uuid, fork_at, msg_session FROM lines
+         WHERE chat_id = ? AND kind = 'you' ORDER BY id DESC LIMIT 1 OFFSET ?`,
+      )
+      .get(chatId, Math.max(0, Math.floor(fromEnd))) as
+      | {
+          id: number;
+          uid: string | null;
+          text: string;
+          files: string | null;
+          msg_uuid: string | null;
+          fork_at: string | null;
+          msg_session: string | null;
+        }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      line: row.id,
+      uid: row.uid,
+      text: row.text,
+      files: row.files ? (JSON.parse(row.files) as string[]) : [],
+      uuid: row.msg_uuid ?? undefined,
+      forkAt: row.fork_at ?? undefined,
+      session: row.msg_session ?? undefined,
+    };
+  }
+
+  /** A rewind: this line and everything after it go. */
+  rewindFrom(chatId: string, lineId: number): void {
+    this.db.prepare('DELETE FROM lines WHERE chat_id = ? AND id >= ?').run(chatId, lineId);
+    this.db.prepare('UPDATE chats SET context = NULL WHERE id = ?').run(chatId);
+  }
+
+  getSession(id: string): string | null {
+    const row = this.db.prepare('SELECT session_id FROM chats WHERE id = ?').get(id) as { session_id: string | null } | undefined;
+    return row?.session_id ?? null;
+  }
+
+  /** The tokens a chat's last turn sent, shown as its context size. */
+  setContext(id: string, tokens: number): void {
+    this.db.prepare('UPDATE chats SET context = ? WHERE id = ?').run(tokens, id);
+  }
+
+  exists(id: string): boolean {
+    return this.db.prepare('SELECT 1 FROM chats WHERE id = ?').get(id) !== undefined;
+  }
+
+  /** When the chat was started here, or null when it isn't here. */
+  createdAt(id: string): number | null {
+    const row = this.db.prepare('SELECT created_at FROM chats WHERE id = ?').get(id) as { created_at: number } | undefined;
+    return row?.created_at ?? null;
+  }
+
+  addLine(chatId: string, line: StoredLine): void {
+    const now = Date.now();
+    const uid = randomUUID();
+    this.insertLine(chatId, uid, line, now);
+  }
+
+  private insertLine(chatId: string, uid: string | null, line: StoredLine, at: number) {
+    this.db
+      .prepare('INSERT INTO lines (chat_id, kind, text, tag, reason, files, ref, created_at, uid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(
+        chatId,
+        line.kind,
+        line.text,
+        line.tag ?? null,
+        line.reason ?? null,
+        line.files?.length ? JSON.stringify(line.files) : null,
+        line.ref ?? null,
+        at,
+        uid,
+      );
+    this.db.prepare('UPDATE chats SET updated_at = MAX(updated_at, ?) WHERE id = ?').run(at, chatId);
+  }
+
+  snapshot(id: string): ChatSnapshot | null {
+    const row = this.db.prepare('SELECT id, title, context, project_id, session_id FROM chats WHERE id = ?').get(id) as
+      { id: string; title: string; context: number | null; project_id: string | null; session_id: string | null } | undefined;
+    if (!row) return null;
+    const chat = {
+      id: row.id,
+      title: row.title,
+      ...(row.session_id ? { resumable: true } : {}),
+      ...(row.context ? { context: row.context } : {}),
+      ...(row.project_id ? { projectId: row.project_id } : {}),
+    };
+    const rows = this.db
+      .prepare(
+        'SELECT kind, text, tag, reason, files, ref, created_at FROM (SELECT * FROM lines WHERE chat_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id',
+      )
+      .all(id, RESTORE_LINES) as LineRow[];
+    return { ...chat, lines: rows.map(fromRow) };
+  }
+
+  /**
+   * The files and folders the user's messages in a chat pointed at (references are stored by
+   * their full path in `files`, uploads by their name): the safety gate trusts them for that chat.
+   */
+  attachedPaths(chatId: string): string[] {
+    const rows = this.db.prepare("SELECT files FROM lines WHERE chat_id = ? AND kind = 'you' AND files IS NOT NULL").all(chatId) as {
+      files: string;
+    }[];
+    const paths = rows.flatMap((r) => JSON.parse(r.files) as string[]).filter((f) => /^[a-z]:[\\/]|^\//i.test(f));
+    return [...new Set(paths)];
+  }
+
+  openChats(): ChatSnapshot[] {
+    const ids = this.db.prepare('SELECT id FROM chats WHERE open = 1 ORDER BY created_at').all() as { id: string }[];
+    return ids.map((r) => this.snapshot(r.id)!).filter(Boolean);
+  }
+
+  /**
+   * The history sidebar's list: only chats with messages, so a tab used just for its
+   * terminal or file explorer (saved when renamed or put in a project) stays out.
+   */
+  history(query = ''): HistoryItem[] {
+    // SQLite refuses LIKE patterns over 50 kB; nobody searches with more than a line anyway.
+    const q = String(query).trim().slice(0, HISTORY_QUERY_MAX);
+    type Row = {
+      id: string;
+      title: string;
+      updated_at: number;
+      open: number;
+      match: string | null;
+      project_id: string | null;
+      summary: string | null;
+    };
+    const rows = q
+      ? (this.db
+          .prepare(
+            `SELECT c.id, c.title, c.updated_at, c.open, c.project_id, c.summary,
+                    (SELECT l.text FROM lines l WHERE l.chat_id = c.id AND l.text LIKE ? ESCAPE '\\' LIMIT 1) AS match
+             FROM chats c
+             WHERE EXISTS (SELECT 1 FROM lines l WHERE l.chat_id = c.id)
+               AND (c.title LIKE ? ESCAPE '\\' OR c.summary LIKE ? ESCAPE '\\'
+                OR EXISTS (SELECT 1 FROM lines l WHERE l.chat_id = c.id AND l.text LIKE ? ESCAPE '\\'))
+             ORDER BY c.updated_at DESC LIMIT 100`,
+          )
+          .all(likePattern(q), likePattern(q), likePattern(q), likePattern(q)) as Row[])
+      : (this.db
+          .prepare(
+            `SELECT c.id, c.title, c.updated_at, c.open, c.project_id, c.summary, NULL AS match
+             FROM chats c
+             WHERE EXISTS (SELECT 1 FROM lines l WHERE l.chat_id = c.id)
+             ORDER BY c.updated_at DESC LIMIT 200`,
+          )
+          .all() as Row[]);
+    return rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      updatedAt: r.updated_at,
+      open: r.open === 1,
+      ...(r.match ? { snippet: snippetAround(r.match, q) } : {}),
+      ...(r.project_id ? { projectId: r.project_id } : {}),
+      ...(r.summary ? { summary: r.summary } : {}),
+    }));
+  }
+
+  /** Title, open state and the last `limit` lines of a chat, for Harv's own chat tools. */
+  transcript(id: string, limit = 60): { title: string; open: boolean; updatedAt: number; lines: StoredLine[] } | null {
+    const chat = this.db.prepare('SELECT title, open, updated_at FROM chats WHERE id = ?').get(id) as
+      { title: string; open: number; updated_at: number } | undefined;
+    if (!chat) return null;
+    const lines = this.snapshot(id)!.lines.slice(-limit);
+    return { title: chat.title, open: chat.open === 1, updatedAt: chat.updated_at, lines };
+  }
+
+  /** /clear: the chat's lines go (it keeps its name and place in history); the next message starts fresh. */
+  clearLines(id: string): void {
+    this.db.prepare('DELETE FROM lines WHERE chat_id = ?').run(id);
+    this.db.prepare('UPDATE chats SET context = NULL WHERE id = ?').run(id);
+  }
+
+  delete(id: string): void {
+    this.db.prepare('DELETE FROM chats WHERE id = ?').run(id);
+  }
+
+  /** The chat's Claude session didn't see its lines as they are now: the next message brings them as context. */
+  markStale(id: string): void {
+    this.db.prepare('UPDATE chats SET stale = 1 WHERE id = ?').run(id);
+  }
+
+  /** Whether the chat got lines from the other device since its Claude session last ran here (and clears the mark). */
+  takeStale(id: string): boolean {
+    return this.db.prepare('UPDATE chats SET stale = 0 WHERE id = ? AND stale = 1').run(id).changes > 0;
+  }
+}
