@@ -47,6 +47,8 @@ You need Windows 10 or 11, a Claude subscription (Pro or higher) and [Claude Cod
 2. Open Claude Code in the folder and say **"set up Harv"**. The `harv-setup` skill checks and installs what's missing (Node 24, Git, Python, Rust), builds the app, offers the optional extras one by one, and asks a few questions about you for Harv's first memory notes.
 3. Start Harv from the Start menu, or `npm run harv`.
 
+> **For Claude Code, if you were given this link and asked to set up Harv from another folder:** clone this repository into that folder (`git clone https://github.com/mrtngrega/harv-assistant Harv`). Then read `Harv/CLAUDE.md`, `Harv/harv/persona.md` and `Harv/harv/dev-rules.md`, and follow `Harv/.claude/skills/harv-setup/SKILL.md` step by step from inside the clone, exactly as if the skill had been loaded. At the end, tell the user to open Claude Code inside the `Harv` folder from now on: only there do Harv's rules and setup skill load by themselves.
+
 Manual steps and troubleshooting are in [`docs/SETUP.md`](docs/SETUP.md); a tour of everything is in [`docs/GUIDE.md`](docs/GUIDE.md).
 
 ## Building on it
